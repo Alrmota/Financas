@@ -10,7 +10,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 type Cents = number; 
 type UUID = string;
 type ISODate = string;
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.3.2";
 
 // --- Constantes de Categoria ---
 const EXPENSE_CATEGORIES = [
@@ -97,6 +97,11 @@ interface UserProfile {
   achievements: string[];
 }
 
+interface AppSettings {
+    githubRepo: string; // ex: "usuario/zenith-app"
+    githubToken?: string; // Para sincronização de dados privados (não implementado full por segurança)
+}
+
 // --- Aggregate Root (Estado Global) ---
 interface AppState {
   accounts: Account[];
@@ -105,6 +110,7 @@ interface AppState {
   assets: InvestmentAsset[];
   notifications: NotificationItem[];
   userProfile: UserProfile;
+  settings: AppSettings;
   // Novos campos para controle de reinvestimento
   processedCorporateActionIds: string[]; // IDs de dividendos já confirmados
   lastReinvestmentResetDate: string; // Data do último "zeramento" do saldo de reinvestimento
@@ -122,6 +128,36 @@ const MoneyService = {
     }).format(amount / 100);
   },
   parse: (val: number): Cents => Math.round(val * 100),
+};
+
+// Serviço de Integração com GitHub (Updates & Sync)
+const GithubService = {
+    // Verifica versão no arquivo index.tsx remoto
+    checkUpdate: async (repoSlug: string, currentVersion: string): Promise<{hasUpdate: boolean, remoteVersion?: string, error?: string}> => {
+        try {
+            // Busca o conteúdo raw do index.tsx na branch main
+            const url = `https://raw.githubusercontent.com/${repoSlug}/main/index.tsx`;
+            const response = await fetch(url);
+            
+            if (response.status === 404) return { hasUpdate: false, error: "Repositório não encontrado" };
+            if (!response.ok) return { hasUpdate: false, error: "Erro de conexão" };
+
+            const text = await response.text();
+            // Regex para encontrar "const APP_VERSION = "x.x.x";"
+            const match = text.match(/const APP_VERSION = "([^"]+)";/);
+            
+            if (match && match[1]) {
+                const remoteVersion = match[1];
+                // Comparação simples de string (pode ser melhorada para semver)
+                const hasUpdate = remoteVersion !== currentVersion;
+                return { hasUpdate, remoteVersion };
+            }
+            
+            return { hasUpdate: false, error: "Versão não identificada no remoto" };
+        } catch (e) {
+            return { hasUpdate: false, error: "Falha na verificação" };
+        }
+    }
 };
 
 // Serviço Simulado de Bolsa de Valores (Para evitar chaves de API quebradas em demo)
@@ -278,30 +314,39 @@ const AIService = {
             const today = new Date().toISOString();
 
             const prompt = `
-                Analyze this financial transaction voice command: "${text}".
-                Context:
-                - Today's Date: ${today}
+                Role: Financial NLP Processor.
+                Task: Analyze the user's spoken voice command and extract structured financial data.
+                
+                Current Context:
+                - Reference Date (Today): ${today}
                 - Available Accounts: ${accountContext}
                 - Available Credit Cards: ${cardContext}
-                - Categories: ${[...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES].join(', ')}
+                - Standard Categories: ${[...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES].join(', ')}
 
                 Instructions:
-                1. Extract the amount.
-                2. Determine type (INCOME or EXPENSE).
-                3. Determine the best matching Category.
-                4. Identify the Account ID or Card ID if mentioned (fuzzy match). If "Credit Card" is mentioned but no specific name, pick the first card. If "Debit" or "Account", pick first account if not specified.
-                5. Format date as ISO string.
+                1. **Amount**: Extract value and convert to CENTS (integer). Example: "45 euros" -> 4500. "10 reais" -> 1000.
+                2. **Type**: 
+                   - Keywords like "gastei", "comprei", "paguei", "perdi", "sushi", "uber" -> EXPENSE.
+                   - Keywords like "recebi", "ganhei", "vendi", "salário" -> INCOME.
+                3. **Category**: Map the item to the closest Standard Category. e.g., "Sushi" -> "Alimentação", "Uber" -> "Veículo".
+                4. **Date**: 
+                   - "hoje" -> Use Reference Date.
+                   - "ontem" -> Reference Date minus 1 day.
+                   - "amanhã" -> Reference Date plus 1 day.
+                5. **Payment Method**: Identify Account ID or Card ID based on fuzzy matching names (e.g., "no nubank", "no visa"). Default to the first account if ambiguous.
                 
-                Return ONLY valid JSON with this schema:
+                Return JSON only:
                 {
-                    "amount": number (in cents/integer),
-                    "description": string (short description),
+                    "amount": number (cents),
+                    "description": string (short title),
                     "type": "INCOME" | "EXPENSE",
                     "category": string,
-                    "date": string (ISO),
+                    "date": string (ISO8601),
                     "accountId": string | null,
                     "cardId": string | null
                 }
+                
+                Input Text: "${text}"
             `;
 
             const response = await ai.models.generateContent({
@@ -319,7 +364,6 @@ const AIService = {
 
         } catch (error) {
             console.error("AI Parse Error", error);
-            // Fallback simples se a API falhar ou não tiver chave
             return null;
         }
     }
@@ -350,7 +394,11 @@ const Icons = {
   Upload: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>,
   DollarSign: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>,
   Check: () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"></polyline></svg>,
-  Refresh: () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>
+  Refresh: () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>,
+  Github: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>,
+  ArrowRight: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"></polyline></svg>,
+  ChevronLeft: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"></polyline></svg>,
+  Cloud: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
 };
 
 // --- COMPONENTES REUTILIZÁVEIS ---
@@ -995,15 +1043,19 @@ const SettingsScreen = ({
   onDeleteCard, 
   onSaveAccount, 
   onDeleteAccount,
-  onImportData
+  onImportData,
+  onUpdateSettings
 }: { 
   state: AppState, 
   onSaveCard: (c: CreditCard) => void, 
   onDeleteCard: (id: string) => void,
   onSaveAccount: (a: Account) => void,
   onDeleteAccount: (id: string) => void,
-  onImportData: (data: AppState) => void
+  onImportData: (data: AppState) => void,
+  onUpdateSettings: (settings: AppSettings) => void
 }) => {
+  const [currentView, setCurrentView] = useState<'MAIN' | 'ACCOUNTS' | 'CARDS' | 'SYSTEM' | 'CLOUD'>('MAIN');
+  
   const [editingCard, setEditingCard] = useState<CreditCard | null>(null);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [isCardModalOpen, setCardModalOpen] = useState(false);
@@ -1015,6 +1067,8 @@ const SettingsScreen = ({
   // Update state
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [remoteVersion, setRemoteVersion] = useState('');
+  const [repoUrl, setRepoUrl] = useState(state.settings?.githubRepo || '');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1107,31 +1161,63 @@ const SettingsScreen = ({
     reader.readAsText(file);
   };
 
-  const handleCheckUpdate = () => {
+  // --- Real GitHub Update Check ---
+  const handleCheckUpdate = async () => {
+    if (!repoUrl) {
+        alert("Configure o repositório GitHub primeiro (ex: usuario/meu-app)");
+        return;
+    }
+    onUpdateSettings({...state.settings, githubRepo: repoUrl});
+    
     setCheckingUpdate(true);
-    // Simula delay de rede
-    setTimeout(() => {
-        setCheckingUpdate(false);
-        // Simula que achou uma versão nova
+    const result = await GithubService.checkUpdate(repoUrl, APP_VERSION);
+    setCheckingUpdate(false);
+    
+    if (result.hasUpdate && result.remoteVersion) {
         setUpdateAvailable(true);
-    }, 2000);
-  };
-
-  const handleUpdateApp = () => {
-    if (window.confirm("Instalar atualização agora? O aplicativo será recarregado.")) {
-        window.location.reload();
+        setRemoteVersion(result.remoteVersion);
+    } else if (result.error) {
+        alert("Erro ao verificar atualização: " + result.error);
+    } else {
+        alert("Você já está na versão mais recente.");
     }
   };
 
-  return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 24 }}>
-        <h2 style={{ fontSize: 24, margin: 0 }}>Configurações</h2>
-        <span style={{ fontSize: 12, color: '#64748b' }}>Ver. {APP_VERSION}</span>
+  const renderMainView = () => (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div onClick={() => setCurrentView('ACCOUNTS')} style={menuItemStyle}>
+              <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                  <div style={menuIconStyle}><Icons.Bank /></div>
+                  <div style={{fontSize: 16, fontWeight: 500}}>Contas Bancárias</div>
+              </div>
+              <Icons.ArrowRight />
+          </div>
+          <div onClick={() => setCurrentView('CARDS')} style={menuItemStyle}>
+              <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                  <div style={menuIconStyle}><Icons.Card /></div>
+                  <div style={{fontSize: 16, fontWeight: 500}}>Cartões de Crédito</div>
+              </div>
+              <Icons.ArrowRight />
+          </div>
+          <div onClick={() => setCurrentView('SYSTEM')} style={menuItemStyle}>
+              <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                  <div style={menuIconStyle}><Icons.Settings /></div>
+                  <div style={{fontSize: 16, fontWeight: 500}}>Sistema e Atualizações</div>
+              </div>
+              <Icons.ArrowRight />
+          </div>
+          <div onClick={() => setCurrentView('CLOUD')} style={menuItemStyle}>
+              <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                  <div style={menuIconStyle}><Icons.Cloud /></div>
+                  <div style={{fontSize: 16, fontWeight: 500}}>Backup e Dados</div>
+              </div>
+              <Icons.ArrowRight />
+          </div>
       </div>
+  );
 
-      <div style={{ marginBottom: 32 }}>
-        <h3 style={{ fontSize: 18, marginBottom: 16 }}>Contas Bancárias</h3>
+  const renderAccountsView = () => (
+      <div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 16 }}>
           {state.accounts.map(a => (
              <div key={a.id} style={{ background: '#1e293b', padding: 16, borderRadius: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1145,12 +1231,14 @@ const SettingsScreen = ({
                 </div>
              </div>
           ))}
+          {state.accounts.length === 0 && <p style={{opacity: 0.5, textAlign: 'center'}}>Nenhuma conta cadastrada.</p>}
         </div>
         <button onClick={() => openAccountModal()} style={actionBtnStyle}>+ Adicionar Conta Bancária</button>
       </div>
+  );
 
-      <div style={{ marginBottom: 32 }}>
-        <h3 style={{ fontSize: 18, marginBottom: 16 }}>Cartões de Crédito</h3>
+  const renderCardsView = () => (
+      <div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 16 }}>
           {state.creditCards.map(c => (
              <div key={c.id} style={{ background: '#1e293b', padding: 16, borderRadius: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1164,47 +1252,89 @@ const SettingsScreen = ({
                 </div>
              </div>
           ))}
+          {state.creditCards.length === 0 && <p style={{opacity: 0.5, textAlign: 'center'}}>Nenhum cartão cadastrado.</p>}
         </div>
         <button onClick={() => openCardModal()} style={actionBtnStyle}>+ Adicionar Cartão de Crédito</button>
       </div>
+  );
 
-      <div style={{ marginBottom: 32, paddingTop: 20, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-        <h3 style={{ fontSize: 14, marginBottom: 16, textTransform: 'uppercase', letterSpacing: 1, color: '#94a3b8' }}>Sistema</h3>
-        <div style={{ background: '#1e293b', padding: 16, borderRadius: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div>
-                <div style={{ fontWeight: 600 }}>Versão {APP_VERSION}</div>
-                <div style={{ fontSize: 12, opacity: 0.6 }}>
-                    {updateAvailable ? 'Nova versão 1.3.0 disponível' : 'Seu app está atualizado'}
+  const renderSystemView = () => (
+        <div style={{ background: '#1e293b', padding: 16, borderRadius: 12 }}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12}}>
+                <div>
+                    <div style={{ fontWeight: 600 }}>Versão {APP_VERSION}</div>
+                    <div style={{ fontSize: 12, opacity: 0.6 }}>
+                        {updateAvailable ? `Nova versão ${remoteVersion} disponível!` : 'Verifique se há novidades no GitHub'}
+                    </div>
+                </div>
+                <div style={{display: 'flex', gap: 8}}>
+                    <button onClick={handleCheckUpdate} disabled={checkingUpdate} style={{...actionBtnStyle, width: 'auto', padding: '8px 16px', fontSize: 12, opacity: checkingUpdate ? 0.5 : 1, display: 'flex', gap: 6, alignItems: 'center'}}>
+                         {checkingUpdate ? 'Verificando...' : <><Icons.Github /> Verificar</>}
+                    </button>
                 </div>
             </div>
-            <div>
-                {updateAvailable ? (
-                     <button onClick={handleUpdateApp} style={{...btnStyle, width: 'auto', padding: '8px 16px', fontSize: 12, background: '#00C853'}}>
-                        Atualizar
-                     </button>
-                ) : (
-                     <button onClick={handleCheckUpdate} disabled={checkingUpdate} style={{...actionBtnStyle, width: 'auto', padding: '8px 16px', fontSize: 12, opacity: checkingUpdate ? 0.5 : 1}}>
-                        {checkingUpdate ? 'Buscando...' : 'Verificar'}
-                     </button>
-                )}
+            
+            <div style={{marginBottom: 8}}>
+                <label style={{fontSize: 11, color: '#64748b', textTransform: 'uppercase'}}>Repositório de Origem (User/Repo)</label>
+                <input 
+                    value={repoUrl} 
+                    onChange={e => setRepoUrl(e.target.value)} 
+                    placeholder="Ex: usuario/zenith-finance" 
+                    style={{...inputStyle, marginTop: 4, background: '#0f172a', border: '1px solid #334155'}}
+                />
             </div>
+            
+            {updateAvailable && (
+                <div style={{marginTop: 12, padding: 12, background: 'rgba(0,200,83,0.1)', border: '1px solid rgba(0,200,83,0.3)', borderRadius: 8}}>
+                    <p style={{margin: 0, fontSize: 13, color: '#00C853', marginBottom: 8}}>
+                        Uma nova versão está disponível no repositório. Como este é um Web App, atualize o código fonte e faça o deploy novamente.
+                    </p>
+                    <a href={`https://github.com/${repoUrl}`} target="_blank" style={{color: '#00C853', fontWeight: 600, fontSize: 13}}>Ver mudanças no GitHub &rarr;</a>
+                </div>
+            )}
         </div>
-      </div>
+  );
 
-      <div style={{ marginBottom: 32, paddingTop: 20, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-        <h3 style={{ fontSize: 14, marginBottom: 16, textTransform: 'uppercase', letterSpacing: 1, color: '#94a3b8' }}>Dados e Backup</h3>
+  const renderCloudView = () => (
         <div style={{display: 'flex', gap: 12}}>
             <button onClick={handleExport} style={{...actionBtnStyle, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8}}>
                 <div style={{ transform: 'scale(0.8)' }}><Icons.Download /></div>
-                Exportar
+                Backup Local
             </button>
             <button onClick={() => fileInputRef.current?.click()} style={{...actionBtnStyle, padding: '12px', fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8}}>
                 <div style={{ transform: 'scale(0.8)' }}><Icons.Upload /></div>
-                Importar
+                Restaurar
             </button>
             <input type="file" ref={fileInputRef} onChange={handleImport} style={{display: 'none'}} accept=".json" />
         </div>
+  );
+
+  const getTitle = () => {
+      switch(currentView) {
+          case 'ACCOUNTS': return 'Contas Bancárias';
+          case 'CARDS': return 'Cartões de Crédito';
+          case 'SYSTEM': return 'Sistema';
+          case 'CLOUD': return 'Dados e Backup';
+          default: return 'Configurações';
+      }
+  }
+
+  return (
+    <div style={{ padding: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24, gap: 12 }}>
+        {currentView !== 'MAIN' && (
+            <div onClick={() => setCurrentView('MAIN')} style={{cursor: 'pointer', padding: 4, borderRadius: '50%', background: '#334155'}}>
+                <Icons.ChevronLeft />
+            </div>
+        )}
+        <h2 style={{ fontSize: 24, margin: 0 }}>{getTitle()}</h2>
       </div>
+
+      {currentView === 'MAIN' && renderMainView()}
+      {currentView === 'ACCOUNTS' && renderAccountsView()}
+      {currentView === 'CARDS' && renderCardsView()}
+      {currentView === 'SYSTEM' && renderSystemView()}
+      {currentView === 'CLOUD' && renderCloudView()}
 
       {isCardModalOpen && (
         <Modal title={editingCard ? "Editar Cartão" : "Novo Cartão"} onClose={() => setCardModalOpen(false)}>
@@ -1240,6 +1370,22 @@ const SettingsScreen = ({
   );
 };
 
+const menuItemStyle = {
+    padding: '16px 0',
+    borderBottom: '1px solid rgba(255,255,255,0.05)',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    cursor: 'pointer',
+    color: '#f8fafc'
+};
+
+const menuIconStyle = {
+    color: '#94a3b8',
+    display: 'flex',
+    alignItems: 'center'
+}
+
 const Modal = ({ title, onClose, children }: any) => (
   <div style={{
     position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100,
@@ -1262,7 +1408,7 @@ const Input = ({ label, ...props }: any) => (
 );
 
 const inputStyle = { width: '100%', background: '#334155', border: 'none', borderRadius: 8, padding: 12, color: 'white', marginTop: 4, outline: 'none' };
-const btnStyle = { width: '100%', padding: 14, background: '#2979FF', color: 'white', border: 'none', borderRadius: 12, fontWeight: 700, cursor: 'pointer' };
+const btnStyle = { width: '100%', padding: 14, background: '#2979FF', color: 'white', border: 'none', borderRadius: 12, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 6px rgba(41, 121, 255, 0.2)' };
 const actionBtnStyle = { width: '100%', padding: 16, background: '#1e293b', border: '1px dashed #334155', color: '#2979FF', borderRadius: 12, fontWeight: 600, cursor: 'pointer' };
 const iconBtnStyle = { background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 8 };
 
@@ -1538,23 +1684,34 @@ const VoiceListeningOverlay = ({ isListening }: { isListening: boolean }) => {
 
     return (
         <div style={{
-            position: 'fixed', inset: 0, zIndex: 999, background: 'rgba(0,0,0,0.8)',
+            position: 'fixed', inset: 0, zIndex: 999, background: 'rgba(15, 23, 42, 0.9)',
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center'
         }}>
+            <div className="voice-waves">
+                <div className="wave w1"></div>
+                <div className="wave w2"></div>
+                <div className="wave w3"></div>
+            </div>
             <div style={{
                 width: 100, height: 100, borderRadius: '50%', background: '#2979FF',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 0 40px #2979FF', animation: 'pulse 1.5s infinite'
+                boxShadow: '0 0 40px #2979FF', zIndex: 10,
+                position: 'relative'
             }}>
                 <Icons.Mic />
             </div>
-            <h2 style={{marginTop: 32, color: 'white'}}>Ouvindo...</h2>
+            <h2 style={{marginTop: 32, color: 'white', fontWeight: 600}}>Ouvindo...</h2>
             <p style={{color: '#94a3b8'}}>Fale: "Gastei 50 reais no almoço..."</p>
+            
             <style>{`
-                @keyframes pulse {
-                    0% { transform: scale(1); opacity: 1; }
-                    50% { transform: scale(1.1); opacity: 0.8; }
-                    100% { transform: scale(1); opacity: 1; }
+                .voice-waves { position: absolute; width: 100px; height: 100px; display: flex; justify-content: center; align-items: center; }
+                .wave { position: absolute; border: 2px solid #2979FF; width: 100%; height: 100%; borderRadius: 50%; opacity: 0; animation: wave 2s infinite linear; }
+                .w1 { animation-delay: 0s; }
+                .w2 { animation-delay: 0.6s; }
+                .w3 { animation-delay: 1.2s; }
+                @keyframes wave {
+                    0% { transform: scale(1); opacity: 0.8; }
+                    100% { transform: scale(3); opacity: 0; }
                 }
             `}</style>
         </div>
@@ -1571,6 +1728,7 @@ const App = () => {
   // Voice State
   const [isListening, setIsListening] = useState(false);
   const [voiceDraftData, setVoiceDraftData] = useState<any>(null);
+  const [flashFeedback, setFlashFeedback] = useState<'NONE' | 'SUCCESS' | 'EXPENSE'>('NONE');
   const recognitionRef = useRef<any>(null);
 
   // Estado Inicial
@@ -1582,7 +1740,8 @@ const App = () => {
     notifications: [],
     userProfile: { level: 1, xp: 0, achievements: [] },
     processedCorporateActionIds: [],
-    lastReinvestmentResetDate: new Date('2024-01-01').toISOString()
+    lastReinvestmentResetDate: new Date('2024-01-01').toISOString(),
+    settings: { githubRepo: '' }
   };
 
   const [state, setState] = useState<AppState>(initialState);
@@ -1598,7 +1757,8 @@ const App = () => {
                 ...prev, // Default structure
                 ...loaded, // Saved data overrides
                 processedCorporateActionIds: loaded.processedCorporateActionIds || [],
-                lastReinvestmentResetDate: loaded.lastReinvestmentResetDate || prev.lastReinvestmentResetDate
+                lastReinvestmentResetDate: loaded.lastReinvestmentResetDate || prev.lastReinvestmentResetDate,
+                settings: loaded.settings || prev.settings
             }));
         } catch (e) {
             console.error("Error loading state", e);
@@ -1776,6 +1936,10 @@ const App = () => {
 
   const handleImportData = (newState: AppState) => {
       setState(newState);
+  }
+
+  const handleUpdateSettings = (newSettings: AppSettings) => {
+      setState(prev => ({...prev, settings: newSettings}));
   }
 
   // --- CONFIRMAÇÃO DE DIVIDENDOS ---
@@ -2006,8 +2170,22 @@ const App = () => {
         const draft = await AIService.parseTransaction(transcript, state);
         if (draft) {
             setVoiceDraftData(draft);
-            setModalOpen(true);
+            
+            // Visual Persuasion (Flash Effect)
+            if (draft.type === 'INCOME') {
+                setFlashFeedback('SUCCESS');
+                // Could play coin sound here
+            } else {
+                setFlashFeedback('EXPENSE');
+            }
+            
+            // Wait for flash before showing modal
+            setTimeout(() => {
+                setFlashFeedback('NONE');
+                setModalOpen(true);
+            }, 400); // 400ms flash duration
         } else {
+            if (navigator.vibrate) navigator.vibrate(200); // Haptic Error
             alert("Não entendi o comando. Tente novamente.");
         }
     };
@@ -2047,6 +2225,7 @@ const App = () => {
             onSaveAccount={handleSaveAccount}
             onDeleteAccount={handleDeleteAccount}
             onImportData={handleImportData}
+            onUpdateSettings={handleUpdateSettings}
         />}
       </div>
 
@@ -2059,6 +2238,14 @@ const App = () => {
       />
 
       <VoiceListeningOverlay isListening={isListening} />
+      
+      {/* FLASH FEEDBACK OVERLAY */}
+      <div style={{
+          position: 'fixed', inset: 0, zIndex: 998, pointerEvents: 'none',
+          background: flashFeedback === 'SUCCESS' ? '#00C853' : (flashFeedback === 'EXPENSE' ? '#FFAB00' : 'transparent'),
+          opacity: flashFeedback === 'NONE' ? 0 : 0.3,
+          transition: 'opacity 0.3s ease-out'
+      }} />
 
       {/* Navegação Inferior integrada */}
       <nav 
