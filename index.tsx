@@ -6,13 +6,11 @@ import { GoogleGenAI, Type } from "@google/genai";
 // CAMADA 1: DOMÍNIO (Entidades e Tipos)
 // ============================================================================
 
-// --- Value Objects ---
 type Cents = number; 
 type UUID = string;
 type ISODate = string;
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.5";
 
-// --- Constantes de Categoria ---
 const EXPENSE_CATEGORIES = [
   'Alimentação', 'Veículo', 'Combustível', 'Imposto', 'Moradia', 
   'Lazer', 'Saúde', 'Educação', 'Pix/Transferência', 'Outros'
@@ -21,12 +19,6 @@ const EXPENSE_CATEGORIES = [
 const INCOME_CATEGORIES = [
   'Salário', 'Rendimentos', 'Vendas', 'Reembolso', 'Pix Recebido', 'Outros'
 ];
-
-const INVESTMENT_CATEGORIES = [
-  'Ações', 'FIIs', 'Renda Fixa', 'Cripto', 'Stocks', 'Outros'
-];
-
-// --- Entidades ---
 
 interface Account {
   id: UUID;
@@ -50,7 +42,7 @@ interface Transaction {
   description: string;
   amount: Cents;
   date: ISODate;
-  type: 'INCOME' | 'EXPENSE' | 'INVESTMENT';
+  type: 'INCOME' | 'EXPENSE' | 'INVESTMENT' | 'TRANSFER'; // Adicionado TRANSFER para lógica interna
   investmentType?: 'BUY' | 'SELL'; 
   category: string;
   accountId?: UUID; 
@@ -76,17 +68,10 @@ interface FinancialGoal {
     id: UUID;
     title: string;
     targetAmount: Cents;
+    savedAmount?: Cents; 
+    linkedAccountId?: UUID; 
     deadline: ISODate;
-    type: 'NET_WORTH' | 'INVESTMENTS' | 'CRYPTO' | 'EMERGENCY_FUND' | 'CUSTOM';
-}
-
-interface CorporateAction {
-  id: string;
-  ticker: string;
-  type: 'DIVIDEND' | 'JCP' | 'RENDIMENTO';
-  amountPerShare: Cents;
-  paymentDate: ISODate;
-  dataCom: ISODate;
+    type: 'NET_WORTH' | 'INVESTMENTS' | 'CRYPTO' | 'EMERGENCY_FUND' | 'CUSTOM' | 'ACCOUNT_TARGET';
 }
 
 interface NotificationItem {
@@ -109,7 +94,6 @@ interface AppSettings {
     githubToken?: string;
 }
 
-// --- Aggregate Root (Estado Global) ---
 interface AppState {
   accounts: Account[];
   creditCards: CreditCard[];
@@ -124,7 +108,7 @@ interface AppState {
 }
 
 // ============================================================================
-// CAMADA 2: DADOS E REGRAS DE NEGÓCIO (Serviços)
+// CAMADA 2: SERVIÇOS
 // ============================================================================
 
 const MoneyService = {
@@ -137,30 +121,47 @@ const MoneyService = {
   parse: (val: number): Cents => Math.round(val * 100),
 };
 
-// Serviço de Integração com GitHub
-const GithubService = {
-    checkUpdate: async (repoSlug: string, currentVersion: string): Promise<{hasUpdate: boolean, remoteVersion?: string, error?: string}> => {
-        try {
-            const url = `https://raw.githubusercontent.com/${repoSlug}/main/index.tsx`;
-            const response = await fetch(url);
-            
-            if (response.status === 404) return { hasUpdate: false, error: "Repositório não encontrado" };
-            if (!response.ok) return { hasUpdate: false, error: "Erro de conexão" };
-
-            const text = await response.text();
-            const match = text.match(/const APP_VERSION = "([^"]+)";/);
-            
-            if (match && match[1]) {
-                const remoteVersion = match[1];
-                const hasUpdate = remoteVersion !== currentVersion;
-                return { hasUpdate, remoteVersion };
-            }
-            
-            return { hasUpdate: false, error: "Versão não identificada no remoto" };
-        } catch (e) {
-            return { hasUpdate: false, error: "Falha na verificação" };
+const SoundService = {
+  play: (type: 'START' | 'SUCCESS' | 'ERROR') => {
+    try {
+        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        const now = ctx.currentTime;
+        
+        if (type === 'START') {
+            osc.frequency.setValueAtTime(440, now);
+            osc.frequency.exponentialRampToValueAtTime(880, now + 0.1);
+            gain.gain.setValueAtTime(0.1, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
+        } else if (type === 'SUCCESS') {
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(523.25, now);
+            osc.frequency.setValueAtTime(659.25, now + 0.1);
+            gain.gain.setValueAtTime(0.1, now);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+            osc.start(now);
+            osc.stop(now + 0.4);
+        } else if (type === 'ERROR') {
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, now);
+            gain.gain.setValueAtTime(0.1, now);
+            gain.gain.linearRampToValueAtTime(0.001, now + 0.3);
+            osc.start(now);
+            osc.stop(now + 0.3);
         }
+    } catch (e) {
+        console.error("Audio error", e);
     }
+  }
 };
 
 const MarketDataService = {
@@ -179,38 +180,17 @@ const MarketDataService = {
     return currentPrice;
   },
 
-  fetchUpcomingDividends: async (): Promise<CorporateAction[]> => {
-    const today = new Date();
-    const addDays = (days: number) => {
-      const d = new Date(today);
-      d.setDate(d.getDate() + days);
-      return d.toISOString().split('T')[0];
-    };
-
-    return [
-      { id: `div-mxrf-${addDays(0)}`, ticker: 'MXRF11', type: 'RENDIMENTO', amountPerShare: 12, paymentDate: addDays(0), dataCom: addDays(-10) }, 
-      { id: `div-xpml-${addDays(-1)}`, ticker: 'XPML11', type: 'RENDIMENTO', amountPerShare: 92, paymentDate: addDays(-1), dataCom: addDays(-8) }, 
-      { id: `div-petr-${addDays(5)}`, ticker: 'PETR4', type: 'DIVIDEND', amountPerShare: 145, paymentDate: addDays(5), dataCom: addDays(-20) },
-      { id: `div-vale-${addDays(12)}`, ticker: 'VALE3', type: 'JCP', amountPerShare: 233, paymentDate: addDays(12), dataCom: addDays(-30) },
-      { id: `div-hglg-${addDays(15)}`, ticker: 'HGLG11', type: 'RENDIMENTO', amountPerShare: 110, paymentDate: addDays(15), dataCom: addDays(-15) },
-      { id: `div-itub-${addDays(2)}`, ticker: 'ITUB4', type: 'JCP', amountPerShare: 15, paymentDate: addDays(2), dataCom: addDays(-30) }
-    ];
+  fetchUpcomingDividends: async (): Promise<any[]> => {
+    return [];
   }
 };
 
 const CreditCardService = {
-  generateInstallmentPlan: (
-    card: CreditCard,
-    amount: Cents,
-    totalInstallments: number,
-    description: string,
-    category: string,
-    purchaseDate: Date
-  ): Transaction[] => {
+  generateInstallmentPlan: (card: CreditCard, amount: Cents, totalInstallments: number, description: string, category: string, purchaseDate: Date): Transaction[] => {
     const transactions: Transaction[] = [];
     const installmentValue = Math.round(amount / totalInstallments);
-    
     const pDate = new Date(purchaseDate);
+    
     let targetMonth = pDate.getMonth();
     let targetYear = pDate.getFullYear();
 
@@ -219,8 +199,7 @@ const CreditCardService = {
     }
 
     for (let i = 0; i < totalInstallments; i++) {
-      const dueDate = new Date(targetYear, targetMonth + 1 + i, card.dueDay);
-      
+      const dueDate = new Date(targetYear, targetMonth + 1 + i, card.dueDay); 
       transactions.push({
         id: `txn-${Date.now()}-${i}`,
         description: `${description} (${i + 1}/${totalInstallments})`,
@@ -233,7 +212,6 @@ const CreditCardService = {
         installment: { current: i + 1, total: totalInstallments }
       });
     }
-
     return transactions;
   },
 
@@ -296,6 +274,13 @@ const InvestmentService = {
 
 const GoalService = {
     calculateProgress: (goal: FinancialGoal, state: AppState): Cents => {
+        if (goal.linkedAccountId) {
+            const account = state.accounts.find(a => a.id === goal.linkedAccountId);
+            return account ? account.balance : 0;
+        }
+        if (goal.type === 'CUSTOM' || goal.type === 'EMERGENCY_FUND') {
+            return goal.savedAmount || 0;
+        }
         switch(goal.type) {
             case 'NET_WORTH':
                 return InvestmentService.calculateNetWorth(state.accounts, state.assets);
@@ -307,13 +292,6 @@ const GoalService = {
                 return state.assets
                     .filter(a => a.type === 'CRYPTO')
                     .reduce((acc, a) => acc + (a.quantity * a.currentPrice), 0);
-            case 'EMERGENCY_FUND':
-                return state.accounts
-                    .filter(a => a.type === 'SAVINGS')
-                    .reduce((acc, a) => acc + a.balance, 0);
-            case 'CUSTOM':
-                // Custom logic would go here, defaulting to Net Worth for simplicity in this demo
-                return InvestmentService.calculateNetWorth(state.accounts, state.assets);
             default: return 0;
         }
     }
@@ -329,25 +307,25 @@ const AIService = {
             const today = new Date().toISOString();
 
             const prompt = `
-                Role: Financial Assistant AI.
+                Role: Financial Assistant AI (Brazilian Portuguese).
                 Task: Extract transaction details from user voice command.
                 
                 Context:
                 - Date Today: ${today}
-                - Accounts: ${accountContext}
-                - Cards: ${cardContext}
+                - Accounts (ID/Name): ${accountContext}
+                - Cards (ID/Name): ${cardContext}
                 - Categories: ${[...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES].join(', ')}
 
                 Instructions:
                 1. **Amount**: Extract numeric value to CENTS. "50 reais" = 5000.
-                2. **Type**: "Ganhei/Recebi" = INCOME. "Gastei/Paguei/Comprei" = EXPENSE.
+                2. **Type**: "Ganhei/Recebi/Depósito" = INCOME. "Gastei/Paguei/Comprei/Saque" = EXPENSE. "Investi/Comprei Ação" = INVESTMENT. "Transferi" = TRANSFER.
                 3. **Category**: Match closest standard category.
                 4. **Date**: Parse relative dates (hoje, ontem) to YYYY-MM-DD.
-                5. **Description**: Brief summary of the expense.
+                5. **Description**: Brief summary.
                 
                 Input: "${text}"
                 
-                Return JSON only: { "amount": number, "description": string, "type": "INCOME"|"EXPENSE", "category": string, "date": string, "accountId": string?, "cardId": string? }
+                Return JSON only.
             `;
 
             const response = await ai.models.generateContent({
@@ -370,17 +348,33 @@ const AIService = {
     }
 }
 
+const GithubService = {
+    checkUpdate: async (repo: string, currentVersion: string) => {
+        try {
+            const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`);
+            if (!response.ok) return { error: 'Repo não encontrado' };
+            const data = await response.json();
+            const remoteVersion = data.tag_name.replace('v', '');
+            return {
+                hasUpdate: remoteVersion !== currentVersion,
+                remoteVersion
+            };
+        } catch (e) {
+            return { error: 'Erro de conexão' };
+        }
+    }
+};
+
 // ============================================================================
-// CAMADA 3: APRESENTAÇÃO (UI Componentes & Gerenciamento de Estado)
+// CAMADA 3: UI
 // ============================================================================
 
-// --- ÍCONES ---
 const Icons = {
   Home: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>,
   Card: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>,
   Bank: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 21h18M5 21V7l8-4 8 4v14M10 10a2 2 0 1 1 4 0 2 2 0 0 1-4 0z" /></svg>,
   TrendingUp: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>,
-  Settings: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>,
+  Settings: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1 2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>,
   Plus: () => <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>,
   Mic: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>,
   ArrowUp: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#00C853" strokeWidth="2"><polyline points="18 15 12 9 6 15"></polyline></svg>,
@@ -397,10 +391,9 @@ const Icons = {
   Github: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"></path></svg>,
   ArrowRight: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"></polyline></svg>,
   ChevronLeft: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"></polyline></svg>,
-  Cloud: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>
+  Cloud: () => <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>,
+  Link: () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg>
 };
-
-// --- COMPONENTES REUTILIZÁVEIS ---
 
 const Card = ({ children, style, onClick }: any) => (
   <div onClick={onClick} style={{
@@ -412,10 +405,58 @@ const Card = ({ children, style, onClick }: any) => (
   }}>{children}</div>
 );
 
-// Input de Moeda com Máscara
+const inputStyle = {
+  width: '100%', padding: 12, background: '#0f172a', border: '1px solid #334155',
+  borderRadius: 8, color: 'white', fontSize: 16, outline: 'none', boxSizing: 'border-box' as const
+};
+
+const btnStyle = {
+  width: '100%', padding: 14, background: '#2979FF', border: 'none',
+  borderRadius: 8, color: 'white', fontWeight: 600, cursor: 'pointer', fontSize: 16
+};
+
+const actionBtnStyle = {
+    background: '#334155', border: 'none', color: 'white', padding: '10px 16px', borderRadius: 8, cursor: 'pointer', fontSize: 14
+};
+
+const menuItemStyle = {
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: 16, background: '#1e293b', borderBottom: '1px solid rgba(255,255,255,0.05)',
+    cursor: 'pointer'
+};
+
+const menuIconStyle = {
+    width: 32, height: 32, borderRadius: 8, background: '#334155',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94a3b8'
+};
+
+const sendSystemNotification = (title: string, body: string) => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification(title, { body });
+    }
+};
+
+const Modal = ({ title, onClose, children }: { title: string, onClose: () => void, children: React.ReactNode }) => (
+  <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.7)', padding: 20 }}>
+    <div style={{ background: '#1e293b', padding: 24, borderRadius: 16, width: '100%', maxWidth: 400, border: '1px solid rgba(255,255,255,0.1)', maxHeight: '90vh', overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
+        <h3 style={{ margin: 0 }}>{title}</h3>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 4, fontSize: 20 }}>×</button> 
+      </div>
+      {children}
+    </div>
+  </div>
+);
+
+const Input = ({ label, ...props }: any) => (
+  <div style={{ marginBottom: 16 }}>
+    <label style={{ display: 'block', fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>{label}</label>
+    <input style={inputStyle} {...props} />
+  </div>
+);
+
 const CurrencyInput = ({ value, onChange, label, autoFocus }: { value: Cents, onChange: (val: Cents) => void, label: string, autoFocus?: boolean }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Remove tudo que não for dígito
     const digits = e.target.value.replace(/\D/g, '');
     onChange(Number(digits));
   };
@@ -445,15 +486,12 @@ const RollingNumber = ({ value }: { value: number }) => {
   return <span>{MoneyService.format(display)}</span>;
 };
 
-// --- RED DOT BADGE ---
 const Badge = () => (
     <div style={{
         width: 10, height: 10, borderRadius: '50%', background: '#FF5252',
         position: 'absolute', top: 0, right: 0, border: '2px solid #0f172a'
     }} />
 );
-
-// --- GRÁFICOS ---
 
 const NetWorthChart = ({ history }: { history: number[] }) => {
   const points = history.map((val, i) => {
@@ -495,12 +533,12 @@ const TransactionRow = ({ t, onDelete }: { t: Transaction, onDelete?: (id: strin
     sign = '+';
   } else if (isInvestment) {
     if (t.investmentType === 'SELL') {
-      color = '#00C853'; // Venda = Entrada de Caixa
+      color = '#00C853'; 
       bg = '#00C85322';
       Icon = Icons.Exchange;
       sign = '+';
     } else {
-      color = '#FFAB00'; // Compra = Saída de Caixa (Investido)
+      color = '#FFAB00'; 
       bg = '#FFAB0022';
       Icon = Icons.Exchange;
       sign = '';
@@ -540,9 +578,9 @@ const TransactionRow = ({ t, onDelete }: { t: Transaction, onDelete?: (id: strin
   );
 };
 
-// --- TELAS & WIDGETS ---
+// --- TELAS ---
 
-const HomeScreen = ({ state, onOpenSettings, unreadCount, onOpenGoals }: { state: AppState, onOpenSettings: () => void, unreadCount: number, onOpenGoals: () => void }) => {
+const HomeScreen = ({ state, onOpenSettings, unreadCount }: { state: AppState, onOpenSettings: () => void, unreadCount: number }) => {
   const netWorth = InvestmentService.calculateNetWorth(state.accounts, state.assets);
   
   const history = useMemo(() => {
@@ -565,14 +603,12 @@ const HomeScreen = ({ state, onOpenSettings, unreadCount, onOpenGoals }: { state
           <h2 style={{ margin: 0, fontSize: 14, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 1 }}>Patrimônio Líquido</h2>
           <h1 style={{ margin: 0, fontSize: 32, fontWeight: 700 }}><RollingNumber value={netWorth} /></h1>
         </div>
-        
-        {/* Ícone de Configurações Reduzido (75%) */}
         <button 
             onClick={onOpenSettings} 
             style={{ 
                 background: '#1e293b', border: '1px solid rgba(255,255,255,0.05)', 
                 color: '#94a3b8', padding: 10, borderRadius: 12, cursor: 'pointer', position: 'relative',
-                transform: 'scale(0.85)', transformOrigin: 'top right' // Reduces visual size
+                transform: 'scale(0.85)', transformOrigin: 'top right' 
             }}
         >
             <Icons.Settings />
@@ -586,35 +622,6 @@ const HomeScreen = ({ state, onOpenSettings, unreadCount, onOpenGoals }: { state
         </div>
         <NetWorthChart history={history} />
       </Card>
-
-      {/* Seção de Metas (Nova) */}
-      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12}}>
-         <h3 style={{ fontSize: 18, margin: 0 }}>Minhas Metas</h3>
-         <button onClick={onOpenGoals} style={{background: 'none', border: 'none', color: '#2979FF', fontSize: 14, fontWeight: 600, cursor: 'pointer'}}>Ver Todas</button>
-      </div>
-      
-      <div style={{display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 16, marginBottom: 24}}>
-          {state.goals.length === 0 ? (
-              <div onClick={onOpenGoals} style={{minWidth: 200, padding: 20, background: '#1e293b', borderRadius: 16, border: '1px dashed #334155', cursor: 'pointer', textAlign: 'center', color: '#94a3b8'}}>
-                 + Criar Meta
-              </div>
-          ) : (
-              state.goals.map(goal => {
-                  const current = GoalService.calculateProgress(goal, state);
-                  const percent = Math.min((current / goal.targetAmount) * 100, 100);
-                  return (
-                      <div key={goal.id} style={{minWidth: 220, padding: 16, background: '#1e293b', borderRadius: 16, border: '1px solid rgba(255,255,255,0.05)'}}>
-                          <div style={{fontSize: 14, fontWeight: 600, marginBottom: 8}}>{goal.title}</div>
-                          <div style={{fontSize: 20, fontWeight: 700, color: '#00C853', marginBottom: 8}}>{MoneyService.format(current)}</div>
-                          <div style={{fontSize: 11, color: '#94a3b8', marginBottom: 6}}>Meta: {MoneyService.format(goal.targetAmount)}</div>
-                          <div style={{width: '100%', height: 6, background: '#334155', borderRadius: 3}}>
-                              <div style={{width: `${percent}%`, height: '100%', background: percent >= 100 ? '#FFD700' : '#2979FF', borderRadius: 3}}></div>
-                          </div>
-                      </div>
-                  )
-              })
-          )}
-      </div>
 
       <h3 style={{ fontSize: 18, marginBottom: 16 }}>Resumo de Contas</h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -636,10 +643,24 @@ const HomeScreen = ({ state, onOpenSettings, unreadCount, onOpenGoals }: { state
   );
 };
 
-// --- IMPLEMENTED SCREENS ---
-
 const BankScreen = ({ state, onDeleteTransaction }: { state: AppState, onDeleteTransaction: (id: string) => void }) => {
     const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
+    const [showFullHistory, setShowFullHistory] = useState(false);
+
+    const recentTxns = useMemo(() => {
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        return state.transactions
+            .filter(t => t.accountId && !t.cardId)
+            .filter(t => new Date(t.date) >= sevenDaysAgo)
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    }, [state.transactions]);
+
+    const allTxns = useMemo(() => {
+        return state.transactions
+            .filter(t => t.accountId && !t.cardId)
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    }, [state.transactions]);
 
     const accountTxns = useMemo(() => {
         if (!selectedAccount) return [];
@@ -648,12 +669,14 @@ const BankScreen = ({ state, onDeleteTransaction }: { state: AppState, onDeleteT
             .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     }, [state.transactions, selectedAccount]);
 
+    const displayTxns = showFullHistory ? allTxns : recentTxns;
+
     return (
         <div style={{ padding: 24 }}>
             {!selectedAccount ? (
                 <>
                     <h2 style={{ marginBottom: 24 }}>Minhas Contas</h2>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 }}>
                         {state.accounts.map(acc => (
                             <Card key={acc.id} onClick={() => setSelectedAccount(acc)} style={{ cursor: 'pointer' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -670,6 +693,19 @@ const BankScreen = ({ state, onDeleteTransaction }: { state: AppState, onDeleteT
                         ))}
                         {state.accounts.length === 0 && <p style={{ opacity: 0.5 }}>Nenhuma conta cadastrada.</p>}
                     </div>
+
+                    <h3 style={{ fontSize: 18, marginBottom: 12 }}>Extrato</h3>
+                    <div>
+                        {displayTxns.length === 0 && <p style={{ opacity: 0.5, fontSize: 14 }}>Nenhuma movimentação.</p>}
+                        {displayTxns.map(t => (
+                            <TransactionRow key={t.id} t={t} />
+                        ))}
+                    </div>
+                    {state.transactions.some(t => t.accountId && !t.cardId) && (
+                         <button onClick={() => setShowFullHistory(!showFullHistory)} style={{...actionBtnStyle, marginTop: 16}}>
+                             {showFullHistory ? 'Ver Extrato Resumido' : 'Ver Extrato Completo'}
+                         </button>
+                    )}
                 </>
             ) : (
                 <>
@@ -700,6 +736,22 @@ const BankScreen = ({ state, onDeleteTransaction }: { state: AppState, onDeleteT
 
 const CardsScreen = ({ state, onDeleteTransaction }: { state: AppState, onDeleteTransaction: (id: string) => void }) => {
     const [selectedCard, setSelectedCard] = useState<CreditCard | null>(null);
+    const [showFullHistory, setShowFullHistory] = useState(false);
+
+    const recentTxns = useMemo(() => {
+        const sevenDaysAgo = new Date();
+        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        return state.transactions
+            .filter(t => t.cardId && t.type === 'EXPENSE')
+            .filter(t => new Date(t.date) >= sevenDaysAgo)
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    }, [state.transactions]);
+
+    const allTxns = useMemo(() => {
+        return state.transactions
+            .filter(t => t.cardId && t.type === 'EXPENSE')
+            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    }, [state.transactions]);
 
     const cardTxns = useMemo(() => {
         if (!selectedCard) return [];
@@ -708,12 +760,14 @@ const CardsScreen = ({ state, onDeleteTransaction }: { state: AppState, onDelete
             .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     }, [state.transactions, selectedCard]);
 
+    const displayTxns = showFullHistory ? allTxns : recentTxns;
+
     return (
         <div style={{ padding: 24 }}>
             {!selectedCard ? (
                 <>
                     <h2 style={{ marginBottom: 24 }}>Meus Cartões</h2>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 }}>
                         {state.creditCards.map(card => {
                             const used = CreditCardService.calculateTotalUsedLimit(state.transactions, card.id);
                             const available = card.limit - used;
@@ -743,6 +797,19 @@ const CardsScreen = ({ state, onDeleteTransaction }: { state: AppState, onDelete
                         })}
                          {state.creditCards.length === 0 && <p style={{ opacity: 0.5 }}>Nenhum cartão cadastrado.</p>}
                     </div>
+
+                    <h3 style={{ fontSize: 18, marginBottom: 12 }}>Transações</h3>
+                    <div>
+                        {displayTxns.length === 0 && <p style={{ opacity: 0.5, fontSize: 14 }}>Nenhuma compra recente.</p>}
+                        {displayTxns.map(t => (
+                            <TransactionRow key={t.id} t={t} />
+                        ))}
+                    </div>
+                    {state.transactions.some(t => t.cardId) && (
+                         <button onClick={() => setShowFullHistory(!showFullHistory)} style={{...actionBtnStyle, marginTop: 16}}>
+                             {showFullHistory ? 'Ver Extrato Resumido' : 'Ver Extrato Completo'}
+                         </button>
+                    )}
                 </>
             ) : (
                 <>
@@ -756,7 +823,10 @@ const CardsScreen = ({ state, onDeleteTransaction }: { state: AppState, onDelete
                     <div style={{display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 16}}>
                         {[0, 1, 2].map(offset => {
                             const total = CreditCardService.calculateInvoiceTotal(state.transactions, selectedCard.id, offset);
-                            const monthName = new Date(new Date().setMonth(new Date().getMonth() + offset)).toLocaleString('pt-BR', { month: 'long' });
+                            const dateForLabel = new Date();
+                            dateForLabel.setMonth(dateForLabel.getMonth() + offset);
+                            const monthName = dateForLabel.toLocaleString('pt-BR', { month: 'long' });
+                            
                             return (
                                 <Card key={offset} style={{minWidth: 140, padding: 16, border: offset === 0 ? '1px solid #2979FF' : 'none'}}>
                                     <div style={{textTransform: 'capitalize', fontSize: 14, marginBottom: 8}}>{monthName}</div>
@@ -779,81 +849,6 @@ const CardsScreen = ({ state, onDeleteTransaction }: { state: AppState, onDelete
     );
 };
 
-const InvestmentsScreen = ({ state, onConfirmDividend, onResetReinvestment }: { state: AppState, onConfirmDividend: (d: any) => void, onResetReinvestment: () => void }) => {
-    const totalInvested = state.assets.reduce((acc, a) => acc + (a.quantity * a.currentPrice), 0);
-    const [upcomingDividends, setUpcomingDividends] = useState<CorporateAction[]>([]);
-
-    useEffect(() => {
-        MarketDataService.fetchUpcomingDividends().then(setUpcomingDividends);
-    }, []);
-
-    const actionableDividends = upcomingDividends.filter(d => 
-        state.assets.some(a => a.ticker === d.ticker && a.quantity > 0) &&
-        !state.processedCorporateActionIds.includes(d.id)
-    );
-
-    return (
-        <div style={{ padding: 24 }}>
-            <h2 style={{ marginBottom: 24 }}>Investimentos</h2>
-            <Card style={{ marginBottom: 24 }}>
-                <div style={{ fontSize: 14, opacity: 0.6 }}>Patrimônio em Ativos</div>
-                <div style={{ fontSize: 32, fontWeight: 700, color: '#00C853' }}>
-                    <RollingNumber value={totalInvested} />
-                </div>
-            </Card>
-
-            {actionableDividends.length > 0 && (
-                <div style={{ marginBottom: 24 }}>
-                    <h3 style={{ fontSize: 18 }}>Proventos a Receber</h3>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                        {actionableDividends.map(div => {
-                            const asset = state.assets.find(a => a.ticker === div.ticker);
-                            const total = (asset?.quantity || 0) * div.amountPerShare;
-                            return (
-                                <Card key={div.id} style={{ borderLeft: '4px solid #00C853', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div>
-                                        <div style={{ fontWeight: 600 }}>{div.ticker}</div>
-                                        <div style={{ fontSize: 12 }}>{div.type} • {new Date(div.paymentDate).toLocaleDateString('pt-BR')}</div>
-                                    </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                                        <div style={{ fontWeight: 700, color: '#00C853' }}>{MoneyService.format(total)}</div>
-                                        <button onClick={() => onConfirmDividend({ id: div.id, asset: div.ticker, amount: total, type: div.type })} style={{ padding: '6px 12px', background: '#00C853', color: 'white', border: 'none', borderRadius: 6, cursor: 'pointer', fontWeight: 600 }}>
-                                            Receber
-                                        </button>
-                                    </div>
-                                </Card>
-                            )
-                        })}
-                    </div>
-                </div>
-            )}
-
-            <h3 style={{ fontSize: 18 }}>Meus Ativos</h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {state.assets.map(asset => {
-                    const total = asset.quantity * asset.currentPrice;
-                    const profitability = ((asset.currentPrice - asset.averagePrice) / asset.averagePrice) * 100;
-                    return (
-                        <Card key={asset.id}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                                <div style={{ fontWeight: 600 }}>{asset.ticker}</div>
-                                <div style={{ fontWeight: 700 }}>{MoneyService.format(total)}</div>
-                            </div>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.8 }}>
-                                <div>{asset.quantity} cotas • PM {MoneyService.format(asset.averagePrice)}</div>
-                                <div style={{ color: profitability >= 0 ? '#00C853' : '#FF5252' }}>
-                                    {profitability >= 0 ? '+' : ''}{profitability.toFixed(2)}%
-                                </div>
-                            </div>
-                        </Card>
-                    );
-                })}
-                {state.assets.length === 0 && <p style={{ opacity: 0.5 }}>Nenhum ativo na carteira.</p>}
-            </div>
-        </div>
-    );
-};
-
 const SettingsScreen = ({ 
   state, 
   onSaveCard, 
@@ -862,7 +857,10 @@ const SettingsScreen = ({
   onDeleteAccount,
   onImportData,
   onUpdateSettings,
-  onMarkAsRead
+  onMarkAsRead,
+  onSaveGoal,
+  onDeleteGoal,
+  onUpdateGoalAmount
 }: { 
   state: AppState, 
   onSaveCard: (c: CreditCard) => void, 
@@ -871,13 +869,22 @@ const SettingsScreen = ({
   onDeleteAccount: (id: string) => void,
   onImportData: (data: AppState) => void,
   onUpdateSettings: (settings: AppSettings) => void,
-  onMarkAsRead: (id: string) => void
+  onMarkAsRead: (id: string) => void,
+  onSaveGoal: (g: FinancialGoal) => void,
+  onDeleteGoal: (id: string) => void,
+  onUpdateGoalAmount: (id: string, amount: Cents) => void
 }) => {
-  const [currentView, setCurrentView] = useState<'MAIN' | 'ACCOUNTS' | 'CARDS' | 'SYSTEM' | 'CLOUD' | 'NOTIFICATIONS'>('MAIN');
+  const [currentView, setCurrentView] = useState<'MAIN' | 'ACCOUNTS' | 'CARDS' | 'SYSTEM' | 'CLOUD' | 'NOTIFICATIONS' | 'GOALS'>('MAIN');
   const [editingCard, setEditingCard] = useState<CreditCard | null>(null);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [isCardModalOpen, setCardModalOpen] = useState(false);
   const [isAccountModalOpen, setAccountModalOpen] = useState(false);
+  
+  const [isGoalModalOpen, setGoalModalOpen] = useState(false);
+  const [goalForm, setGoalForm] = useState({ title: '', target: '', date: '', type: 'NET_WORTH', linkedAccountId: '' });
+  const [selectedGoal, setSelectedGoal] = useState<FinancialGoal | null>(null);
+  const [operationAmount, setOperationAmount] = useState<Cents>(0);
+
   const [cardForm, setCardForm] = useState({ id: '', name: '', limit: '', closing: '', due: '', brand: 'MASTERCARD' });
   const [accountForm, setAccountForm] = useState({ id: '', name: '', type: 'CHECKING' });
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -886,10 +893,7 @@ const SettingsScreen = ({
   const [repoUrl, setRepoUrl] = useState(state.settings?.githubRepo || '');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Unread Count Logic - Now respects 'read' property
   const unreadCount = useMemo(() => state.notifications.filter(n => !n.read).length, [state.notifications]);
-  
-  // Show only unread notifications in the list
   const unreadNotifications = useMemo(() => state.notifications.filter(n => !n.read), [state.notifications]);
 
   const openCardModal = (card?: CreditCard) => {
@@ -948,6 +952,29 @@ const SettingsScreen = ({
       currency: 'BRL'
     });
     setAccountModalOpen(false);
+  }
+
+  const handleGoalSubmit = (e: React.FormEvent) => {
+      e.preventDefault();
+      onSaveGoal({
+          id: `goal-${Date.now()}`,
+          title: goalForm.title,
+          targetAmount: MoneyService.parse(parseFloat(goalForm.target)),
+          deadline: goalForm.date,
+          type: goalForm.type as any,
+          linkedAccountId: goalForm.linkedAccountId || undefined
+      });
+      setGoalModalOpen(false);
+      setGoalForm({ title: '', target: '', date: '', type: 'NET_WORTH', linkedAccountId: '' });
+  };
+
+  const handleGoalOperation = (type: 'DEPOSIT' | 'WITHDRAW') => {
+      if(!selectedGoal || !operationAmount) return;
+      
+      const newAmount = type === 'DEPOSIT' ? operationAmount : -operationAmount;
+      onUpdateGoalAmount(selectedGoal.id, newAmount);
+      setSelectedGoal(null);
+      setOperationAmount(0);
   }
 
   const handleExport = () => {
@@ -1019,6 +1046,13 @@ const SettingsScreen = ({
                  {unreadCount > 0 && <div style={{width: 8, height: 8, background: '#FF5252', borderRadius: '50%', marginRight: 12}}></div>}
                  <Icons.ArrowRight />
               </div>
+          </div>
+          <div onClick={() => setCurrentView('GOALS')} style={menuItemStyle}>
+              <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                  <div style={menuIconStyle}><Icons.Target /></div>
+                  <div style={{fontSize: 16, fontWeight: 500}}>Metas Financeiras</div>
+              </div>
+              <Icons.ArrowRight />
           </div>
           <div onClick={() => setCurrentView('ACCOUNTS')} style={menuItemStyle}>
               <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
@@ -1124,6 +1158,50 @@ const renderCardsView = () => (
     </div>
 );
 
+const renderGoalsView = () => (
+    <div>
+        <div style={{ marginBottom: 16 }}>
+            <button onClick={() => setGoalModalOpen(true)} style={actionBtnStyle}>+ Nova Meta</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {state.goals.map((goal: FinancialGoal) => {
+                const current = GoalService.calculateProgress(goal, state);
+                const percent = Math.min((current / goal.targetAmount) * 100, 100);
+                const timeLeft = Math.ceil((new Date(goal.deadline).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
+                const linkedAccount = goal.linkedAccountId ? state.accounts.find(a => a.id === goal.linkedAccountId) : null;
+                
+                return (
+                    <Card key={goal.id} onClick={() => setSelectedGoal(goal)} style={{cursor: 'pointer'}}>
+                        <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 12}}>
+                            <div style={{display: 'flex', alignItems: 'center', gap: 8}}>
+                                <div style={{fontWeight: 600, fontSize: 18}}>{goal.title}</div>
+                                {linkedAccount && (
+                                    <div style={{display: 'flex', alignItems: 'center', gap: 4, background: '#2979FF22', color: '#2979FF', padding: '2px 8px', borderRadius: 4, fontSize: 10}}>
+                                        <Icons.Link />
+                                        {linkedAccount.name}
+                                    </div>
+                                )}
+                            </div>
+                            <button onClick={(e) => { e.stopPropagation(); onDeleteGoal(goal.id); }} style={{color: '#FF5252', background: 'none', border: 'none', cursor: 'pointer'}}><Icons.Trash /></button>
+                        </div>
+                        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 8}}>
+                            <div style={{fontSize: 28, fontWeight: 700, color: '#00C853'}}>{MoneyService.format(current)}</div>
+                            <div style={{fontSize: 14, color: '#94a3b8', paddingBottom: 6}}>de {MoneyService.format(goal.targetAmount)}</div>
+                        </div>
+                        <div style={{width: '100%', height: 10, background: '#334155', borderRadius: 5, marginBottom: 12}}>
+                            <div style={{width: `${percent}%`, height: '100%', background: percent >= 100 ? '#FFD700' : '#2979FF', borderRadius: 5, transition: 'width 1s'}}></div>
+                        </div>
+                        <div style={{fontSize: 12, opacity: 0.6}}>
+                            {timeLeft > 0 ? `${timeLeft} dias restantes` : 'Prazo finalizado'} • {new Date(goal.deadline).toLocaleDateString('pt-BR')}
+                        </div>
+                    </Card>
+                )
+            })}
+             {state.goals.length === 0 && <p style={{ opacity: 0.5 }}>Nenhuma meta definida.</p>}
+        </div>
+    </div>
+);
+
 const renderSystemView = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <Card>
@@ -1179,6 +1257,7 @@ const renderCloudView = () => (
           case 'SYSTEM': return 'Sistema';
           case 'CLOUD': return 'Dados e Backup';
           case 'NOTIFICATIONS': return 'Notificações';
+          case 'GOALS': return 'Metas Financeiras';
           default: return 'Configurações';
       }
   }
@@ -1200,6 +1279,7 @@ const renderCloudView = () => (
       {currentView === 'SYSTEM' && renderSystemView()}
       {currentView === 'CLOUD' && renderCloudView()}
       {currentView === 'NOTIFICATIONS' && renderNotificationsView()}
+      {currentView === 'GOALS' && renderGoalsView()}
 
       {/* Modals for Card/Account are unchanged */}
       {isCardModalOpen && (
@@ -1232,465 +1312,436 @@ const renderCloudView = () => (
             </form>
         </Modal>
       )}
+
+      {isGoalModalOpen && (
+            <Modal title="Nova Meta" onClose={() => setGoalModalOpen(false)}>
+                <form onSubmit={handleGoalSubmit}>
+                    <Input label="Nome da Meta" value={goalForm.title} onChange={(e: any) => setGoalForm({...goalForm, title: e.target.value})} placeholder="Ex: Viagem, Carro Novo" />
+                    <Input label="Valor Alvo (R$)" type="number" value={goalForm.target} onChange={(e: any) => setGoalForm({...goalForm, target: e.target.value})} />
+                    <Input label="Prazo" type="date" value={goalForm.date} onChange={(e: any) => setGoalForm({...goalForm, date: e.target.value})} />
+                    <div style={{marginBottom: 16}}>
+                        <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>Tipo de Objetivo</label>
+                        <select style={inputStyle} value={goalForm.type} onChange={(e: any) => setGoalForm({...goalForm, type: e.target.value, linkedAccountId: ''})}>
+                            <option value="NET_WORTH">Patrimônio Total</option>
+                            <option value="INVESTMENTS">Total em Investimentos</option>
+                            <option value="CRYPTO">Total em Cripto</option>
+                            <option value="EMERGENCY_FUND">Reserva de Emergência (Poupança)</option>
+                            <option value="CUSTOM">Reserva Manual</option>
+                            <option value="ACCOUNT_TARGET">Saldo de Conta (Caixinha)</option>
+                        </select>
+                    </div>
+                    {goalForm.type === 'ACCOUNT_TARGET' && (
+                        <div style={{marginBottom: 16}}>
+                            <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>Vincular Conta</label>
+                            <select style={inputStyle} value={goalForm.linkedAccountId} onChange={(e: any) => setGoalForm({...goalForm, linkedAccountId: e.target.value})}>
+                                <option value="">Selecione uma conta...</option>
+                                {state.accounts.map(acc => (
+                                    <option key={acc.id} value={acc.id}>{acc.name}</option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+                    <button type="submit" style={btnStyle}>Criar Meta</button>
+                </form>
+            </Modal>
+      )}
+
+      {selectedGoal && (
+          <Modal title={selectedGoal.title} onClose={() => setSelectedGoal(null)}>
+              <div style={{marginBottom: 24}}>
+                  <p style={{color: '#94a3b8', margin: '0 0 8px 0'}}>Progresso Atual</p>
+                  <div style={{fontSize: 24, fontWeight: 700, color: '#00C853'}}>{MoneyService.format(GoalService.calculateProgress(selectedGoal, state))}</div>
+                  <p style={{fontSize: 12, opacity: 0.6}}>Meta: {MoneyService.format(selectedGoal.targetAmount)}</p>
+                  {selectedGoal.linkedAccountId && (
+                      <p style={{fontSize: 12, color: '#2979FF', marginTop: 8}}>
+                          <Icons.Link /> Vinculado a {state.accounts.find(a => a.id === selectedGoal.linkedAccountId)?.name}
+                      </p>
+                  )}
+              </div>
+              
+              {!selectedGoal.linkedAccountId && (
+                  <div style={{borderTop: '1px solid #334155', paddingTop: 16}}>
+                      <p style={{color: 'white', fontWeight: 600, marginBottom: 12}}>Movimentar Reserva</p>
+                      <CurrencyInput label="Valor" value={operationAmount} onChange={setOperationAmount} />
+                      <div style={{display: 'flex', gap: 12, marginTop: 12}}>
+                          <button onClick={() => handleGoalOperation('DEPOSIT')} style={{...btnStyle, background: '#00C853'}}>Depositar</button>
+                          <button onClick={() => handleGoalOperation('WITHDRAW')} style={{...btnStyle, background: '#FF5252'}}>Resgatar</button>
+                      </div>
+                  </div>
+              )}
+              {selectedGoal.linkedAccountId && (
+                  <div style={{borderTop: '1px solid #334155', paddingTop: 16, opacity: 0.7}}>
+                      <p style={{fontSize: 13}}>O progresso desta meta é atualizado automaticamente conforme o saldo da conta vinculada.</p>
+                  </div>
+              )}
+          </Modal>
+      )}
     </div>
   );
 };
 
-// --- NOVA TELA DE METAS ---
-const GoalsScreen = ({ state, onSaveGoal, onDeleteGoal, onClose }: any) => {
-    const [isModalOpen, setIsModalOpen] = useState(false);
-    const [form, setForm] = useState({ title: '', target: '', date: '', type: 'NET_WORTH' });
+const InvestmentsScreen = ({ state, onConfirmDividend, onResetReinvestment }: { state: AppState, onConfirmDividend: (d: any) => void, onResetReinvestment: () => void }) => {
+    const [dividends, setDividends] = useState<any[]>([]);
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        onSaveGoal({
-            id: `goal-${Date.now()}`,
-            title: form.title,
-            targetAmount: MoneyService.parse(parseFloat(form.target)),
-            deadline: form.date,
-            type: form.type
-        });
-        setIsModalOpen(false);
-        setForm({ title: '', target: '', date: '', type: 'NET_WORTH' });
-    };
+    useEffect(() => {
+        MarketDataService.fetchUpcomingDividends().then(setDividends);
+    }, []);
 
+    const totalInvested = state.assets.reduce((acc, a) => acc + (a.quantity * a.currentPrice), 0);
+    const allocation = state.assets.reduce((acc: any, asset) => {
+        acc[asset.type] = (acc[asset.type] || 0) + (asset.quantity * asset.currentPrice);
+        return acc;
+    }, {});
+    
     return (
-        <div style={{ position: 'fixed', inset: 0, background: '#0f172a', zIndex: 50, overflowY: 'auto' }}>
-            <div style={{ padding: 24 }}>
-                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 24, gap: 12 }}>
-                    <div onClick={onClose} style={{cursor: 'pointer', padding: 4, borderRadius: '50%', background: '#334155'}}>
-                        <Icons.ChevronLeft />
-                    </div>
-                    <h2 style={{ fontSize: 24, margin: 0 }}>Metas Financeiras</h2>
-                </div>
+        <div style={{ padding: 24 }}>
+            <h2 style={{ marginBottom: 24 }}>Investimentos</h2>
+            <Card style={{ marginBottom: 24 }}>
+                <div style={{ fontSize: 14, opacity: 0.6 }}>Patrimônio Investido</div>
+                <div style={{ fontSize: 32, fontWeight: 700, color: '#00C853' }}>{MoneyService.format(totalInvested)}</div>
+            </Card>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                    {state.goals.map((goal: FinancialGoal) => {
-                        const current = GoalService.calculateProgress(goal, state);
-                        const percent = Math.min((current / goal.targetAmount) * 100, 100);
-                        const timeLeft = Math.ceil((new Date(goal.deadline).getTime() - new Date().getTime()) / (1000 * 3600 * 24));
-                        
-                        return (
-                            <Card key={goal.id}>
-                                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 12}}>
-                                    <div style={{fontWeight: 600, fontSize: 18}}>{goal.title}</div>
-                                    <button onClick={() => onDeleteGoal(goal.id)} style={{color: '#FF5252', background: 'none', border: 'none', cursor: 'pointer'}}><Icons.Trash /></button>
-                                </div>
-                                <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 8}}>
-                                    <div style={{fontSize: 28, fontWeight: 700, color: '#00C853'}}>{MoneyService.format(current)}</div>
-                                    <div style={{fontSize: 14, color: '#94a3b8', paddingBottom: 6}}>de {MoneyService.format(goal.targetAmount)}</div>
-                                </div>
-                                <div style={{width: '100%', height: 10, background: '#334155', borderRadius: 5, marginBottom: 12}}>
-                                    <div style={{width: `${percent}%`, height: '100%', background: percent >= 100 ? '#FFD700' : '#2979FF', borderRadius: 5, transition: 'width 1s'}}></div>
-                                </div>
-                                <div style={{fontSize: 12, opacity: 0.6}}>
-                                    {timeLeft > 0 ? `${timeLeft} dias restantes` : 'Prazo finalizado'} • {new Date(goal.deadline).toLocaleDateString('pt-BR')}
-                                </div>
-                            </Card>
-                        )
-                    })}
-                </div>
-                
-                <button onClick={() => setIsModalOpen(true)} style={{...actionBtnStyle, marginTop: 24}}>+ Nova Meta</button>
+            <div style={{ display: 'flex', gap: 12, overflowX: 'auto', paddingBottom: 16 }}>
+                {Object.keys(allocation).map(type => (
+                    <Card key={type} style={{ minWidth: 120, padding: 16 }}>
+                        <div style={{ fontSize: 12, opacity: 0.6 }}>{type}</div>
+                        <div style={{ fontWeight: 600 }}>{MoneyService.format(allocation[type])}</div>
+                    </Card>
+                ))}
             </div>
 
-            {isModalOpen && (
-                <Modal title="Nova Meta" onClose={() => setIsModalOpen(false)}>
-                    <form onSubmit={handleSubmit}>
-                        <Input label="Nome da Meta" value={form.title} onChange={(e: any) => setForm({...form, title: e.target.value})} placeholder="Ex: Viagem, Carro Novo" />
-                        <Input label="Valor Alvo (R$)" type="number" value={form.target} onChange={(e: any) => setForm({...form, target: e.target.value})} />
-                        <Input label="Prazo" type="date" value={form.date} onChange={(e: any) => setForm({...form, date: e.target.value})} />
-                        <div style={{marginBottom: 16}}>
-                            <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>Tipo de Objetivo</label>
-                            <select style={inputStyle} value={form.type} onChange={(e: any) => setForm({...form, type: e.target.value})}>
-                                <option value="NET_WORTH">Patrimônio Total</option>
-                                <option value="INVESTMENTS">Total em Investimentos</option>
-                                <option value="CRYPTO">Total em Cripto</option>
-                                <option value="EMERGENCY_FUND">Reserva de Emergência (Poupança)</option>
-                            </select>
-                        </div>
-                        <button type="submit" style={btnStyle}>Criar Meta</button>
-                    </form>
-                </Modal>
+            {dividends.length > 0 && (
+                <>
+                    <h3 style={{ fontSize: 18 }}>Proventos Previstos</h3>
+                    <div style={{display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24}}>
+                        {dividends.map(div => (
+                            <Card key={div.id} style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                                <div>
+                                    <div style={{fontWeight: 600}}>{div.ticker}</div>
+                                    <div style={{fontSize: 12, opacity: 0.6}}>{div.type} • {new Date(div.paymentDate).toLocaleDateString()}</div>
+                                </div>
+                                <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                                    <div style={{fontWeight: 600, color: '#00C853'}}>{MoneyService.format(div.amount)}</div>
+                                    <button onClick={() => onConfirmDividend({...div, asset: div.ticker})} style={actionBtnStyle}>Receber</button>
+                                </div>
+                            </Card>
+                        ))}
+                    </div>
+                </>
             )}
+
+            <h3 style={{ fontSize: 18 }}>Minha Carteira</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {state.assets.map(asset => {
+                    const total = asset.quantity * asset.currentPrice;
+                    const roi = asset.averagePrice > 0 ? ((asset.currentPrice - asset.averagePrice) / asset.averagePrice) * 100 : 0;
+                    return (
+                        <Card key={asset.id}>
+                            <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: 8}}>
+                                <div style={{fontWeight: 600}}>{asset.ticker}</div>
+                                <div style={{fontWeight: 600}}>{MoneyService.format(total)}</div>
+                            </div>
+                            <div style={{display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.7}}>
+                                <div>{asset.quantity} un. • Médio: {MoneyService.format(asset.averagePrice)}</div>
+                                <div style={{color: roi >= 0 ? '#00C853' : '#FF5252'}}>{roi > 0 ? '+' : ''}{roi.toFixed(1)}%</div>
+                            </div>
+                        </Card>
+                    )
+                })}
+                {state.assets.length === 0 && <p style={{opacity: 0.5}}>Nenhum ativo.</p>}
+            </div>
         </div>
     );
-};
-
-const menuItemStyle = {
-    padding: '16px 0',
-    borderBottom: '1px solid rgba(255,255,255,0.05)',
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    cursor: 'pointer',
-    color: '#f8fafc'
-};
-
-const menuIconStyle = {
-    color: '#94a3b8',
-    display: 'flex',
-    alignItems: 'center'
 }
 
-const Modal = ({ title, onClose, children }: any) => (
-  <div style={{
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 100,
-    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24
-  }} onClick={onClose}>
-    <div style={{
-      background: '#0f172a', width: '100%', maxWidth: 400, borderRadius: 24, padding: 24, border: '1px solid #334155'
-    }} onClick={e => e.stopPropagation()}>
-      <h3 style={{ marginTop: 0 }}>{title}</h3>
-      {children}
-    </div>
-  </div>
-);
+const VoiceListeningOverlay = ({ isListening, transcript }: { isListening: boolean, transcript: string }) => {
+    if (!isListening) return null;
+    
+    const isIncome = /recebi|ganhei|depósito|salário/i.test(transcript);
+    const isExpense = /gastei|paguei|comprei|saque/i.test(transcript);
+    const borderColor = isIncome ? '#00C853' : (isExpense ? '#FF5252' : '#2979FF');
 
-const Input = ({ label, ...props }: any) => (
-  <div style={{ marginBottom: 12, flex: 1 }}>
-    <label style={{ fontSize: 12, color: '#94a3b8' }}>{label}</label>
-    <input required style={inputStyle} {...props} />
-  </div>
-);
-
-const inputStyle = { width: '100%', background: '#334155', border: 'none', borderRadius: 8, padding: 12, color: 'white', marginTop: 4, outline: 'none' };
-const btnStyle = { width: '100%', padding: 14, background: '#2979FF', color: 'white', border: 'none', borderRadius: 12, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 6px rgba(41, 121, 255, 0.2)' };
-const actionBtnStyle = { width: '100%', padding: 16, background: '#1e293b', border: '1px dashed #334155', color: '#2979FF', borderRadius: 12, fontWeight: 600, cursor: 'pointer' };
-const iconBtnStyle = { background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 8 };
-
-// --- MODAL DE TRANSAÇÃO (REESTRUTURADO & CORRIGIDO) ---
-
-const TransactionModal = ({ isOpen, onClose, state, onSave, initialData }: any) => {
-  const [mode, setMode] = useState<'REGULAR' | 'INVESTMENT'>('REGULAR'); // Top Level Toggle
-  const [txnType, setTxnType] = useState<'INCOME' | 'EXPENSE' | 'TRANSFER'>('EXPENSE'); // Sub toggle for Regular
-  
-  const [amount, setAmount] = useState<Cents>(0); 
-  const [description, setDescription] = useState('');
-  const [date, setDate] = useState(''); 
-  const [method, setMethod] = useState<string>(''); 
-  const [installments, setInstallments] = useState(1);
-  const [category, setCategory] = useState('');
-  
-  // Fields for Transfer
-  const [destAccount, setDestAccount] = useState<string>('');
-  
-  // Investment specific fields
-  const [ticker, setTicker] = useState('');
-  const [quantity, setQuantity] = useState('');
-
-  useEffect(() => {
-    if(isOpen) {
-      // PREENCHIMENTO AUTOMÁTICO SE HOUVER INITIAL DATA (VOICE AI)
-      if (initialData) {
-          setAmount(initialData.amount || 0);
-          setDescription(initialData.description || '');
-          setDate(initialData.date ? new Date(initialData.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
-          setMode('REGULAR'); // AI for now only supports regular transactions
-          setTxnType(initialData.type || 'EXPENSE');
-          setCategory(initialData.category || EXPENSE_CATEGORIES[0]);
-          
-          // Tentar encontrar conta ou cartão
-          if (initialData.cardId) {
-             setMethod(initialData.cardId);
-          } else if (initialData.accountId) {
-             setMethod(initialData.accountId);
-          } else {
-             // Fallback
-             setMethod(state.accounts[0]?.id || '');
-          }
-
-      } else {
-        // DEFAULT RESET
-        setMethod(state.accounts[0]?.id || '');
-        setDestAccount(state.accounts.length > 1 ? state.accounts[1].id : '');
-        setCategory(EXPENSE_CATEGORIES[0]);
-        setInstallments(1);
-        setAmount(0);
-        setDescription('');
-        setTicker('');
-        setQuantity('');
-        setDate(new Date().toISOString().split('T')[0]); 
-        setMode('REGULAR');
-        setTxnType('EXPENSE');
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, initialData]); 
-
-  // Update default selections when type changes (only if not using initial data logic)
-  useEffect(() => {
-    if (!initialData) {
-        if (mode === 'INVESTMENT') {
-        setCategory(INVESTMENT_CATEGORIES[0]);
-        setMethod(state.accounts[0]?.id || '');
-        } else {
-            if (txnType === 'INCOME') {
-                setCategory(INCOME_CATEGORIES[0]);
-                setMethod(state.accounts[0]?.id || '');
-            } else if (txnType === 'EXPENSE') {
-                setCategory(EXPENSE_CATEGORIES[0]);
-                setMethod(state.creditCards[0]?.id || state.accounts[0]?.id || '');
-            } else if (txnType === 'TRANSFER') {
-                setCategory('Transferência');
-                setMethod(state.accounts[0]?.id || '');
-                if(state.accounts.length > 1 && state.accounts[0]?.id === state.accounts[1]?.id) {
-                    // Try to pick different dest
+    return (
+        <div style={{ 
+            position: 'fixed', inset: 0, zIndex: 2000, 
+            background: 'rgba(15, 23, 42, 0.9)', 
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', 
+            color: 'white', backdropFilter: 'blur(5px)' 
+        }}>
+            <div style={{ 
+                width: 100, height: 100, borderRadius: '50%', background: 'transparent', 
+                border: `4px solid ${borderColor}`,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 32, 
+                boxShadow: `0 0 40px ${borderColor}44`,
+                animation: 'pulse 1.5s infinite'
+            }}>
+                <Icons.Mic />
+            </div>
+            <h3 style={{ fontSize: 24, margin: '0 0 16px 0', fontWeight: 600 }}>Ouvindo...</h3>
+            <div style={{ 
+                minHeight: 60, padding: '0 24px', textAlign: 'center', 
+                fontSize: 18, fontWeight: 500, opacity: 0.9, lineHeight: 1.5,
+                maxWidth: 400
+            }}>
+                {transcript || "Diga 'Gastei 50 reais no almoço'..."}
+            </div>
+            <style>{`
+                @keyframes pulse {
+                    0% { transform: scale(1); box-shadow: 0 0 0 0 ${borderColor}66; }
+                    70% { transform: scale(1.1); box-shadow: 0 0 0 20px transparent; }
+                    100% { transform: scale(1); box-shadow: 0 0 0 0 transparent; }
                 }
-            }
-        }
-    }
-  }, [mode, txnType, state.accounts, state.creditCards]);
+            `}</style>
+        </div>
+    );
+}
 
-  const handleSubmit = (e: React.FormEvent, investmentAction?: 'BUY' | 'SELL') => {
-    e.preventDefault();
-    if (!amount || !date) return;
-    
-    // Validations
-    if (mode === 'REGULAR' && !description && txnType !== 'TRANSFER') return;
-    if (mode === 'INVESTMENT' && (!ticker || !quantity)) return;
-    if (txnType === 'TRANSFER' && (!method || !destAccount || method === destAccount)) {
-        alert("Selecione contas de origem e destino diferentes.");
-        return;
-    }
+const TransactionModal = ({ isOpen, onClose, state, initialData, onSave }: any) => {
+  const [form, setForm] = useState({
+    description: '', amount: 0, date: new Date().toISOString().split('T')[0],
+    type: 'EXPENSE', category: 'Outros', accountId: '', cardId: '', installments: 1,
+    // Novos campos
+    assetTicker: '', assetQuantity: 0, investmentType: 'BUY',
+    transferFrom: '', transferTo: ''
+  });
 
-    const val = amount;
-    const selectedDate = new Date(date);
-    
-    if (mode === 'REGULAR') {
-        if (txnType === 'TRANSFER') {
-             // Generate 2 Transactions
-             const originAcc = state.accounts.find((a: Account) => a.id === method);
-             const destAcc = state.accounts.find((a: Account) => a.id === destAccount);
-             
-             const txnOut: Transaction = {
-                id: `txn-${Date.now()}-out`, description: `Transf. para ${destAcc?.name}`, amount: val, date: selectedDate.toISOString(),
-                type: 'EXPENSE', category: 'Transferência', accountId: method, isCleared: true
-             };
-             const txnIn: Transaction = {
-                id: `txn-${Date.now()}-in`, description: `Recebido de ${originAcc?.name}`, amount: val, date: selectedDate.toISOString(),
-                type: 'INCOME', category: 'Transferência', accountId: destAccount, isCleared: true
-             };
-             onSave([txnOut, txnIn]);
-        
-        } else if (txnType === 'EXPENSE') {
-            const card = state.creditCards.find((c: CreditCard) => c.id === method);
-            if (card) {
-                const txns = CreditCardService.generateInstallmentPlan(
-                card, val, installments, description, category, selectedDate
-                );
-                onSave(txns);
-            } else {
-                const txn: Transaction = {
-                id: `txn-${Date.now()}`, description, amount: val, date: selectedDate.toISOString(),
-                type: 'EXPENSE', category, accountId: method, isCleared: true
-                };
-                onSave([txn]);
-            }
+  useEffect(() => {
+    if (isOpen) {
+        if (initialData) {
+            setForm(prev => ({ ...prev, ...initialData }));
         } else {
-            // INCOME
-            const txn: Transaction = {
-                id: `txn-${Date.now()}`, description, amount: val, date: selectedDate.toISOString(),
-                type: 'INCOME', category, accountId: method, isCleared: true
-            };
-            onSave([txn]);
+            setForm({
+                description: '', amount: 0, date: new Date().toISOString().split('T')[0],
+                type: 'EXPENSE', category: 'Outros', accountId: state.accounts[0]?.id || '', cardId: '', installments: 1,
+                assetTicker: '', assetQuantity: 0, investmentType: 'BUY',
+                transferFrom: state.accounts[0]?.id || '', transferTo: ''
+            });
         }
-    } else {
-      // INVESTMENT
-      const action = investmentAction || 'BUY';
-      const txn: Transaction = {
-        id: `txn-${Date.now()}`, 
-        description: `${action === 'BUY' ? 'Compra' : 'Venda'} ${ticker}`, 
-        amount: val, 
-        date: selectedDate.toISOString(),
-        type: 'INVESTMENT', 
-        investmentType: action,
-        category: category, 
-        accountId: method, 
-        isCleared: true,
-        assetTicker: ticker.toUpperCase(),
-        assetQuantity: parseFloat(quantity),
-        assetPrice: val / parseFloat(quantity)
-      };
-      onSave([txn]);
     }
-    onClose();
-  };
+  }, [initialData, isOpen, state.accounts]);
 
   if (!isOpen) return null;
 
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    let newTxns: Transaction[] = [];
+    
+    if (form.type === 'TRANSFER') {
+        if (!form.transferFrom || !form.transferTo) {
+            alert("Selecione as contas de origem e destino.");
+            return;
+        }
+        if (form.transferFrom === form.transferTo) {
+            alert("A conta de origem e destino não podem ser iguais.");
+            return;
+        }
+        // Saída
+        newTxns.push({
+            id: `txn-out-${Date.now()}`,
+            description: `Transferência para ${state.accounts.find((a:Account) => a.id === form.transferTo)?.name}`,
+            amount: form.amount,
+            date: form.date,
+            type: 'EXPENSE',
+            category: 'Pix/Transferência',
+            accountId: form.transferFrom,
+            isCleared: true
+        });
+        // Entrada
+        newTxns.push({
+            id: `txn-in-${Date.now()}`,
+            description: `Recebido de ${state.accounts.find((a:Account) => a.id === form.transferFrom)?.name}`,
+            amount: form.amount,
+            date: form.date,
+            type: 'INCOME',
+            category: 'Pix/Transferência',
+            accountId: form.transferTo,
+            isCleared: true
+        });
+    } else if (form.type === 'INVESTMENT') {
+        newTxns.push({
+            id: `txn-${Date.now()}`,
+            description: `${form.investmentType === 'BUY' ? 'Compra' : 'Venda'} ${form.assetTicker.toUpperCase()}`,
+            amount: form.amount,
+            date: form.date,
+            type: 'INVESTMENT',
+            category: 'Investimentos',
+            investmentType: form.investmentType as any,
+            accountId: form.accountId,
+            assetTicker: form.assetTicker.toUpperCase(),
+            assetQuantity: Number(form.assetQuantity),
+            assetPrice: Math.round(form.amount / (Number(form.assetQuantity) || 1)),
+            isCleared: true
+        });
+    } else {
+        // Expense / Income logic
+        const isCard = !!form.cardId;
+        if (isCard && form.installments > 1 && form.type === 'EXPENSE') {
+            const card = state.creditCards.find((c: CreditCard) => c.id === form.cardId);
+            if (card) {
+                newTxns = CreditCardService.generateInstallmentPlan(
+                    card, form.amount, form.installments, form.description, form.category, new Date(form.date)
+                );
+            }
+        } else {
+            newTxns.push({
+                id: `txn-${Date.now()}`,
+                description: form.description,
+                amount: form.amount,
+                date: form.date,
+                type: form.type as any,
+                category: form.category,
+                accountId: form.accountId || undefined,
+                cardId: form.cardId || undefined,
+                isCleared: !isCard
+            });
+        }
+    }
+    
+    onSave(newTxns);
+    onClose();
+  };
+
+  const getTypeColor = (t: string) => {
+      if(t === 'EXPENSE') return '#FF5252';
+      if(t === 'INCOME') return '#00C853';
+      if(t === 'INVESTMENT') return '#FFD700';
+      if(t === 'TRANSFER') return '#2979FF';
+      return '#334155';
+  }
+
   return (
-    <Modal title="Novo Lançamento" onClose={onClose}>
-      
-      {/* Top Level Toggle: Investment vs Regular */}
-      <div style={{ display: 'flex', background: '#1e293b', padding: 4, borderRadius: 12, marginBottom: 16 }}>
-        <button onClick={() => setMode('INVESTMENT')} style={{ flex: 1, padding: 10, borderRadius: 8, border: 'none', fontWeight: 600, background: mode === 'INVESTMENT' ? '#FFAB00' : 'transparent', color: mode === 'INVESTMENT' ? 'white' : '#94a3b8', transition: 'all 0.2s', cursor: 'pointer', fontSize: 13}}>Investimentos</button>
-        <button onClick={() => setMode('REGULAR')} style={{ flex: 1, padding: 10, borderRadius: 8, border: 'none', fontWeight: 600, background: mode === 'REGULAR' ? '#2979FF' : 'transparent', color: mode === 'REGULAR' ? 'white' : '#94a3b8', transition: 'all 0.2s', cursor: 'pointer', fontSize: 13}}>Despesa / Receita</button>
-      </div>
-
-      {/* Sub Toggle if Regular */}
-      {mode === 'REGULAR' && (
-          <div style={{ display: 'flex', background: '#334155', padding: 2, borderRadius: 8, marginBottom: 24, width: '100%' }}>
-            <button onClick={() => setTxnType('EXPENSE')} style={{ flex: 1, padding: 8, borderRadius: 6, border: 'none', fontWeight: 600, background: txnType === 'EXPENSE' ? '#FF5252' : 'transparent', color: txnType === 'EXPENSE' ? 'white' : '#94a3b8', transition: 'all 0.2s', cursor: 'pointer', fontSize: 12}}>Despesa</button>
-            <button onClick={() => setTxnType('INCOME')} style={{ flex: 1, padding: 8, borderRadius: 6, border: 'none', fontWeight: 600, background: txnType === 'INCOME' ? '#00C853' : 'transparent', color: txnType === 'INCOME' ? 'white' : '#94a3b8', transition: 'all 0.2s', cursor: 'pointer', fontSize: 12}}>Receita</button>
-            <button onClick={() => setTxnType('TRANSFER')} style={{ flex: 1, padding: 8, borderRadius: 6, border: 'none', fontWeight: 600, background: txnType === 'TRANSFER' ? '#64748b' : 'transparent', color: txnType === 'TRANSFER' ? 'white' : '#94a3b8', transition: 'all 0.2s', cursor: 'pointer', fontSize: 12}}>Transferência</button>
-          </div>
-      )}
-
-      <form onSubmit={(e) => handleSubmit(e)}>
-        <CurrencyInput label="Valor Total" value={amount} onChange={setAmount} autoFocus />
-
-        {/* 1. SELEÇÃO DE PAGAMENTO (AGORA ABAIXO DO VALOR) */}
-        
-        {txnType === 'TRANSFER' ? (
-           <div style={{display: 'flex', gap: 12, marginBottom: 12}}>
-              <div style={{flex: 1}}>
-                  <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>De (Origem)</label>
-                  <select value={method} onChange={e => setMethod(e.target.value)} style={inputStyle}>
-                    {state.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-              </div>
-              <div style={{flex: 1}}>
-                  <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>Para (Destino)</label>
-                  <select value={destAccount} onChange={e => setDestAccount(e.target.value)} style={inputStyle}>
-                    {state.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
-              </div>
-           </div>
-        ) : (
-            <div style={{ marginBottom: 12 }}>
-                <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>
-                {mode === 'INVESTMENT' ? 'Origem do Recurso' : (txnType === 'INCOME' ? 'Conta Destino' : 'Pagamento')}
-                </label>
-                <select value={method} onChange={e => setMethod(e.target.value)} style={inputStyle}>
-                <optgroup label="Contas Bancárias">
-                    {state.accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </optgroup>
-                {mode === 'REGULAR' && txnType === 'EXPENSE' && (
-                    <optgroup label="Cartões de Crédito">
-                    {state.creditCards.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                    </optgroup>
-                )}
-                </select>
-            </div>
-        )}
-
-        {/* 2. PARCELAMENTO (DESTAQUE SE FOR CARTÃO) */}
-        {mode === 'REGULAR' && txnType === 'EXPENSE' && state.creditCards.find(c => c.id === method) && (
-          <div style={{ marginBottom: 16, background: '#1e293b', padding: 12, borderRadius: 12, border: '1px solid #ffffff10' }}>
-            <label style={{ display: 'block', color: '#2979FF', fontSize: 12, marginBottom: 4, fontWeight: '600' }}>Parcelamento</label>
-            <select value={installments} onChange={e => setInstallments(Number(e.target.value))} style={{...inputStyle, background: '#0f172a', border: '1px solid #2979FF'}}>
-              {[...Array(12)].map((_, i) => (
-                <option key={i} value={i+1}>{i+1}x {amount ? MoneyService.format(Math.round(amount / (i+1))) : ''}</option>
-              ))}
-            </select>
-          </div>
-        )}
-        
-        {/* 3. CAMPOS ESPECÍFICOS */}
-        {mode === 'INVESTMENT' ? (
-          <div style={{display: 'flex', gap: 12}}>
-            <Input label="Código (Ticker)" placeholder="PETR4" value={ticker} onChange={(e: any) => setTicker(e.target.value.toUpperCase())} />
-            <Input label="Quantidade" type="number" step="0.01" value={quantity} onChange={(e: any) => setQuantity(e.target.value)} />
-          </div>
-        ) : (
-          txnType !== 'TRANSFER' && <Input label="Descrição" type="text" placeholder="Ex: Almoço" value={description} onChange={(e: any) => setDescription(e.target.value)} />
-        )}
-        
-        {/* 4. DATA E CATEGORIA */}
-        <div style={{display: 'flex', gap: 12}}>
-            <Input label="Data" type="date" value={date} onChange={(e: any) => setDate(e.target.value)} />
-            
-            {txnType !== 'TRANSFER' && (
-                <div style={{flex: 1, marginBottom: 12}}>
-                    <label style={{ display: 'block', color: '#94a3b8', fontSize: 12, marginBottom: 4 }}>Categoria</label>
-                    <select value={category} onChange={e => setCategory(e.target.value)} style={inputStyle}>
-                        {(mode === 'INVESTMENT' ? INVESTMENT_CATEGORIES : (txnType === 'INCOME' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)).map(c => <option key={c} value={c}>{c}</option>)}
-                    </select>
-                </div>
-            )}
+    <Modal title="Nova Transação" onClose={onClose}>
+      <form onSubmit={handleSubmit}>
+        <div style={{display: 'flex', gap: 8, marginBottom: 16, overflowX: 'auto', paddingBottom: 4}}>
+            {['EXPENSE', 'INCOME', 'INVESTMENT', 'TRANSFER'].map(t => (
+                <button 
+                    key={t}
+                    type="button" 
+                    onClick={() => setForm({...form, type: t as any})} 
+                    style={{
+                        padding: '10px 12px', borderRadius: 8, border: 'none', 
+                        background: form.type === t ? getTypeColor(t) : '#334155', 
+                        color: 'white', cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                        whiteSpace: 'nowrap', flex: 1
+                    }}
+                >
+                    {t === 'EXPENSE' ? 'Despesa' : t === 'INCOME' ? 'Receita' : t === 'INVESTMENT' ? 'Investimento' : 'Transferência'}
+                </button>
+            ))}
         </div>
 
-        {/* Action Buttons */}
-        {mode === 'INVESTMENT' ? (
-            <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
-                <button type="button" onClick={(e) => handleSubmit(e, 'BUY')} style={{...btnStyle, background: '#00C853'}}>Comprar</button>
-                <button type="button" onClick={(e) => handleSubmit(e, 'SELL')} style={{...btnStyle, background: '#FF5252'}}>Vender</button>
-            </div>
-        ) : (
-            <button type="submit" style={{...btnStyle, marginTop: 12}}>Confirmar</button>
+        <CurrencyInput label="Valor" value={form.amount} onChange={(val) => setForm({...form, amount: val})} autoFocus />
+        
+        {form.type !== 'TRANSFER' && (
+            <Input label="Descrição" value={form.description} onChange={(e: any) => setForm({...form, description: e.target.value})} placeholder="Ex: Almoço, Salário" />
         )}
+        
+        <div style={{display: 'flex', gap: 12}}>
+            <Input label="Data" type="date" value={form.date} onChange={(e: any) => setForm({...form, date: e.target.value})} />
+        </div>
+
+        {/* --- TRANSFER UI --- */}
+        {form.type === 'TRANSFER' && (
+            <>
+                <div style={{marginBottom: 16}}>
+                    <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>De (Origem)</label>
+                    <select style={inputStyle} value={form.transferFrom} onChange={(e: any) => setForm({...form, transferFrom: e.target.value})}>
+                        <option value="">Selecione...</option>
+                        {state.accounts.map((a: Account) => <option key={a.id} value={a.id}>{a.name} ({MoneyService.format(a.balance)})</option>)}
+                    </select>
+                </div>
+                <div style={{marginBottom: 16}}>
+                    <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>Para (Destino)</label>
+                    <select style={inputStyle} value={form.transferTo} onChange={(e: any) => setForm({...form, transferTo: e.target.value})}>
+                        <option value="">Selecione...</option>
+                        {state.accounts.map((a: Account) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                </div>
+            </>
+        )}
+
+        {/* --- INVESTMENT UI --- */}
+        {form.type === 'INVESTMENT' && (
+            <>
+                <div style={{display: 'flex', gap: 12, marginBottom: 16}}>
+                    <button type="button" onClick={() => setForm({...form, investmentType: 'BUY'})} style={{flex: 1, padding: 10, background: form.investmentType === 'BUY' ? '#00C853' : '#334155', border: 'none', borderRadius: 8, color: 'white'}}>Comprar</button>
+                    <button type="button" onClick={() => setForm({...form, investmentType: 'SELL'})} style={{flex: 1, padding: 10, background: form.investmentType === 'SELL' ? '#00C853' : '#334155', border: 'none', borderRadius: 8, color: 'white'}}>Vender</button>
+                </div>
+                <div style={{display:'flex', gap: 12}}>
+                    <Input label="Ticker (Código)" value={form.assetTicker} onChange={(e: any) => setForm({...form, assetTicker: e.target.value})} placeholder="Ex: PETR4" />
+                    <Input label="Quantidade" type="number" value={form.assetQuantity} onChange={(e: any) => setForm({...form, assetQuantity: e.target.value})} />
+                </div>
+                <div style={{marginBottom: 16}}>
+                    <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>Conta Corretora</label>
+                    <select style={inputStyle} value={form.accountId} onChange={(e: any) => setForm({...form, accountId: e.target.value})}>
+                        <option value="">Selecione...</option>
+                        {state.accounts.map((a: Account) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                </div>
+            </>
+        )}
+
+        {/* --- STANDARD EXPENSE/INCOME UI --- */}
+        {(form.type === 'EXPENSE' || form.type === 'INCOME') && (
+            <>
+                <div style={{marginBottom: 16}}>
+                    <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>Categoria</label>
+                    <select style={inputStyle} value={form.category} onChange={(e: any) => setForm({...form, category: e.target.value})}>
+                        {(form.type === 'INCOME' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                </div>
+
+                <div style={{marginBottom: 16}}>
+                    <label style={{display:'block', fontSize:12, color:'#94a3b8', marginBottom:4}}>{form.type === 'INCOME' ? 'Conta Destino' : 'Meio de Pagamento'}</label>
+                    <select style={inputStyle} value={form.cardId || form.accountId} onChange={(e: any) => {
+                        const val = e.target.value;
+                        if (form.type === 'INCOME') {
+                             setForm({...form, accountId: val});
+                        } else {
+                            const isCard = state.creditCards.some((c: CreditCard) => c.id === val);
+                            if(isCard) setForm({...form, cardId: val, accountId: ''});
+                            else setForm({...form, accountId: val, cardId: ''});
+                        }
+                    }}>
+                        <option value="">Selecione...</option>
+                        <optgroup label="Contas">
+                            {state.accounts.map((a: Account) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                        </optgroup>
+                        {form.type === 'EXPENSE' && (
+                            <optgroup label="Cartões">
+                                {state.creditCards.map((c: CreditCard) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                            </optgroup>
+                        )}
+                    </select>
+                </div>
+
+                {!!form.cardId && form.type === 'EXPENSE' && (
+                    <Input label="Parcelas" type="number" min="1" max="24" value={form.installments} onChange={(e: any) => setForm({...form, installments: parseInt(e.target.value)})} />
+                )}
+            </>
+        )}
+
+        <button type="submit" style={btnStyle}>Salvar</button>
       </form>
     </Modal>
   );
 };
 
-// --- COMPONENTE DE ESCUTA DE VOZ (VISUAL) ---
-const VoiceListeningOverlay = ({ isListening }: { isListening: boolean }) => {
-    if (!isListening) return null;
-
-    return (
-        <div style={{
-            position: 'fixed', inset: 0, zIndex: 999, background: 'rgba(15, 23, 42, 0.9)',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center'
-        }}>
-            <div className="voice-waves">
-                <div className="wave w1"></div>
-                <div className="wave w2"></div>
-                <div className="wave w3"></div>
-            </div>
-            <div style={{
-                width: 100, height: 100, borderRadius: '50%', background: '#2979FF',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                boxShadow: '0 0 40px #2979FF', zIndex: 10,
-                position: 'relative'
-            }}>
-                <Icons.Mic />
-            </div>
-            <h2 style={{marginTop: 32, color: 'white', fontWeight: 600}}>Ouvindo...</h2>
-            <p style={{color: '#94a3b8'}}>Fale algo como:</p>
-            <p style={{color: 'white', fontWeight: 500}}>"Gastei 50 reais com Uber hoje"</p>
-            
-            <style>{`
-                .voice-waves { position: absolute; width: 100px; height: 100px; display: flex; justify-content: center; align-items: center; }
-                .wave { position: absolute; border: 2px solid #2979FF; width: 100%; height: 100%; borderRadius: 50%; opacity: 0; animation: wave 2s infinite linear; }
-                .w1 { animation-delay: 0s; }
-                .w2 { animation-delay: 0.6s; }
-                .w3 { animation-delay: 1.2s; }
-                @keyframes wave {
-                    0% { transform: scale(1); opacity: 0.8; }
-                    100% { transform: scale(3); opacity: 0; }
-                }
-            `}</style>
-        </div>
-    )
-}
-
-// --- HELPER: NATIVE NOTIFICATIONS ---
-const sendSystemNotification = (title: string, body: string) => {
-    if (!('Notification' in window)) return;
-    
-    if (Notification.permission === 'granted') {
-        new Notification(title, { body, icon: 'https://cdn-icons-png.flaticon.com/512/2953/2953363.png' });
-    }
-};
-
-// --- PONTO DE ENTRADA DO APP ---
-
 const App = () => {
   const [activeTab, setActiveTab] = useState<'HOME' | 'CARDS' | 'BANKS' | 'INVESTMENTS' | 'SETTINGS'>('HOME');
   const [isModalOpen, setModalOpen] = useState(false);
-  const [isGoalsOpen, setIsGoalsOpen] = useState(false);
   const [locked, setLocked] = useState(true);
 
-  // Voice State
   const [isListening, setIsListening] = useState(false);
+  const [transcript, setTranscript] = useState('');
   const [voiceDraftData, setVoiceDraftData] = useState<any>(null);
   const [flashFeedback, setFlashFeedback] = useState<'NONE' | 'SUCCESS' | 'EXPENSE'>('NONE');
+  
+  const [longPressProgress, setLongPressProgress] = useState(0);
   const recognitionRef = useRef<any>(null);
-  const longPressTimerRef = useRef<any>(null);
+  const progressAnimationRef = useRef<any>(null);
+  const PRESS_DURATION = 5000; 
 
-  // Estado Inicial
   const initialState: AppState = {
     accounts: [],
     creditCards: [],
@@ -1706,17 +1757,14 @@ const App = () => {
 
   const [state, setState] = useState<AppState>(initialState);
 
-  // Request Notification Permission on Load
   useEffect(() => {
      if ('Notification' in window && Notification.permission === 'default') {
          Notification.requestPermission();
      }
   }, []);
 
-  // Unread Count for Bottom Bar Badge - Only counts unread
   const unreadCount = useMemo(() => state.notifications.filter(n => !n.read).length, [state.notifications]);
 
-  // Persistência Offline
   useEffect(() => {
     const saved = localStorage.getItem('zenith_superapp_v3_br');
     if (saved) {
@@ -1725,7 +1773,7 @@ const App = () => {
             setState(prev => ({
                 ...prev, 
                 ...loaded, 
-                goals: loaded.goals || [], // Migration for new field
+                goals: loaded.goals || [], 
                 processedCorporateActionIds: loaded.processedCorporateActionIds || [],
                 lastReinvestmentResetDate: loaded.lastReinvestmentResetDate || prev.lastReinvestmentResetDate,
                 settings: loaded.settings || prev.settings
@@ -1740,13 +1788,11 @@ const App = () => {
     localStorage.setItem('zenith_superapp_v3_br', JSON.stringify(state));
   }, [state]);
 
-  // --- HEALTH CHECK: Monitoramento de Limites e Prazos ---
   useEffect(() => {
       const checkSystemHealth = async () => {
           const alerts: NotificationItem[] = [];
           const today = new Date();
           const todayStr = today.toISOString().split('T')[0];
-          const dayOfMonth = today.getDate();
           
           const tomorrow = new Date(today);
           tomorrow.setDate(tomorrow.getDate() + 1);
@@ -1769,9 +1815,6 @@ const App = () => {
               }
           });
 
-          // ... (Existing Credit Card Alert Logic) ...
-          
-          // 3. Verificar Provisão de Dividendos
           if (state.assets.length > 0) {
             const divs = await MarketDataService.fetchUpcomingDividends();
             divs.forEach(div => {
@@ -1800,7 +1843,6 @@ const App = () => {
       checkSystemHealth();
   }, [state.transactions, state.accounts, state.creditCards, state.assets, state.processedCorporateActionIds]); 
 
-  // Efeito de Atualização da Bolsa
   useEffect(() => {
     const updateMarketData = async () => {
       if (state.assets.length === 0) return;
@@ -1825,7 +1867,6 @@ const App = () => {
       }));
   }
 
-  // --- GOALS HANDLERS ---
   const handleSaveGoal = (goal: FinancialGoal) => {
       setState(prev => ({ ...prev, goals: [...prev.goals, goal] }));
   }
@@ -1834,8 +1875,19 @@ const App = () => {
         setState(prev => ({ ...prev, goals: prev.goals.filter(g => g.id !== id) }));
       }
   }
+  
+  const handleUpdateGoalAmount = (id: string, amount: Cents) => {
+      setState(prev => ({
+          ...prev,
+          goals: prev.goals.map(g => {
+              if (g.id !== id) return g;
+              const currentSaved = g.savedAmount || 0;
+              const newSaved = currentSaved + amount;
+              return { ...g, savedAmount: Math.max(0, newSaved) };
+          })
+      }));
+  }
 
-  // --- CONFIRMAÇÃO DE DIVIDENDOS ---
   const handleConfirmDividend = (dividend: {id: string, asset: string, amount: number, type: string}) => {
       if(state.accounts.length === 0) {
           alert('Adicione uma conta bancária primeiro para receber os proventos.');
@@ -1865,7 +1917,6 @@ const App = () => {
         const txn = prev.transactions.find(t => t.id === id);
         if(!txn) return prev;
         
-        // Simplified Reversal Logic (Can be extracted to Service)
         const updatedAccounts = prev.accounts.map(acc => {
             if (acc.id !== txn.accountId) return acc;
             let newBalance = acc.balance;
@@ -1962,7 +2013,6 @@ const App = () => {
     if (window.confirm("Tem certeza que deseja excluir esta conta?")) setState(prev => ({ ...prev, accounts: prev.accounts.filter(a => a.id !== id) }));
   };
 
-  // --- VOICE HANDLERS (5 Second Press Logic) ---
   const startListening = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -1972,20 +2022,34 @@ const App = () => {
     const recognition = new SpeechRecognition();
     recognition.lang = 'pt-BR';
     recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.interimResults = true; 
 
-    recognition.onstart = () => setIsListening(true);
+    recognition.onstart = () => {
+        setIsListening(true);
+        setTranscript('');
+        SoundService.play('START');
+        if (navigator.vibrate) navigator.vibrate(100);
+    };
+
     recognition.onend = () => setIsListening(false);
+    
     recognition.onresult = async (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        const draft = await AIService.parseTransaction(transcript, state);
-        if (draft) {
-            setVoiceDraftData(draft);
-            if (draft.type === 'INCOME') setFlashFeedback('SUCCESS'); else setFlashFeedback('EXPENSE');
-            setTimeout(() => { setFlashFeedback('NONE'); setModalOpen(true); }, 400); 
-        } else {
-            if (navigator.vibrate) navigator.vibrate(200);
-            alert("Não entendi o comando. Tente novamente.");
+        const currentTranscript = Array.from(event.results)
+            .map((result: any) => result[0].transcript)
+            .join('');
+        setTranscript(currentTranscript);
+
+        if (event.results[0].isFinal) {
+            const draft = await AIService.parseTransaction(currentTranscript, state);
+            if (draft) {
+                setVoiceDraftData(draft);
+                SoundService.play('SUCCESS');
+                if (draft.type === 'INCOME') setFlashFeedback('SUCCESS'); else setFlashFeedback('EXPENSE');
+                setTimeout(() => { setFlashFeedback('NONE'); setModalOpen(true); }, 500); 
+            } else {
+                SoundService.play('ERROR');
+                if (navigator.vibrate) navigator.vibrate([100, 50, 100]);
+            }
         }
     };
     recognition.start();
@@ -1997,17 +2061,28 @@ const App = () => {
   };
   
   const handleButtonDown = () => {
-      longPressTimerRef.current = setTimeout(() => {
-          if (navigator.vibrate) navigator.vibrate(50);
-          startListening();
-      }, 500); // 500ms threshold for "long press" feeling (5s is too long for UX)
+      const startTime = Date.now();
+      const animate = () => {
+          const elapsed = Date.now() - startTime;
+          const progress = Math.min((elapsed / PRESS_DURATION) * 100, 100);
+          setLongPressProgress(progress);
+          
+          if (progress < 100) {
+              progressAnimationRef.current = requestAnimationFrame(animate);
+          } else {
+              setLongPressProgress(0); 
+              startListening();
+          }
+      };
+      progressAnimationRef.current = requestAnimationFrame(animate);
   }
   
   const handleButtonUp = () => {
-      clearTimeout(longPressTimerRef.current);
-      if(isListening) {
-          stopListening();
+      cancelAnimationFrame(progressAnimationRef.current);
+      if (longPressProgress > 0 && longPressProgress < 100) {
+          if (!isListening) setModalOpen(true);
       }
+      setLongPressProgress(0);
   }
 
   if (locked) {
@@ -2023,7 +2098,7 @@ const App = () => {
   return (
     <div style={{ height: '100%', overflowY: 'auto', overflowX: 'hidden' }}>
       <div style={{ paddingBottom: 100 }}>
-        {activeTab === 'HOME' && <HomeScreen state={state} onOpenSettings={() => setActiveTab('SETTINGS')} unreadCount={unreadCount} onOpenGoals={() => setIsGoalsOpen(true)} />}
+        {activeTab === 'HOME' && <HomeScreen state={state} onOpenSettings={() => setActiveTab('SETTINGS')} unreadCount={unreadCount} />}
         {activeTab === 'CARDS' && <CardsScreen state={state} onDeleteTransaction={handleDeleteTransaction} />}
         {activeTab === 'BANKS' && <BankScreen state={state} onDeleteTransaction={handleDeleteTransaction} />}
         {activeTab === 'INVESTMENTS' && <InvestmentsScreen state={state} onConfirmDividend={handleConfirmDividend} onResetReinvestment={handleResetReinvestment} />}
@@ -2036,6 +2111,9 @@ const App = () => {
             onImportData={handleImportData}
             onUpdateSettings={handleUpdateSettings}
             onMarkAsRead={handleMarkAsRead}
+            onSaveGoal={handleSaveGoal}
+            onDeleteGoal={handleDeleteGoal}
+            onUpdateGoalAmount={handleUpdateGoalAmount}
         />}
       </div>
 
@@ -2047,16 +2125,7 @@ const App = () => {
         onSave={handleNewTransactions}
       />
 
-      {isGoalsOpen && (
-          <GoalsScreen 
-            state={state} 
-            onSaveGoal={handleSaveGoal}
-            onDeleteGoal={handleDeleteGoal}
-            onClose={() => setIsGoalsOpen(false)}
-          />
-      )}
-
-      <VoiceListeningOverlay isListening={isListening} />
+      <VoiceListeningOverlay isListening={isListening} transcript={transcript} />
       
       <div style={{
           position: 'fixed', inset: 0, zIndex: 998, pointerEvents: 'none',
@@ -2074,26 +2143,35 @@ const App = () => {
         <button onClick={() => setActiveTab('HOME')} style={{ background: 'none', border: 'none', color: activeTab === 'HOME' ? '#2979FF' : '#64748b', padding: 8, cursor: 'pointer' }}><Icons.Home /></button>
         <button onClick={() => setActiveTab('INVESTMENTS')} style={{ background: 'none', border: 'none', color: activeTab === 'INVESTMENTS' ? '#2979FF' : '#64748b', padding: 8, cursor: 'pointer' }}><Icons.TrendingUp /></button>
         
-        {/* Floating Action Button with Long Press for Voice */}
-        <button 
-          onMouseDown={handleButtonDown}
-          onMouseUp={handleButtonUp}
-          onTouchStart={(e) => { e.preventDefault(); handleButtonDown(); }}
-          onTouchEnd={(e) => { e.preventDefault(); handleButtonUp(); }}
-          onClick={(e) => {
-              if (!isListening) setModalOpen(true);
-          }}
-          style={{
-            width: 64, height: 64, borderRadius: '50%', background: isListening ? '#FF5252' : '#2979FF',
-            border: '6px solid #0f172a', 
-            color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 8px 24px rgba(41, 121, 255, 0.5)', 
-            marginTop: -40, 
-            cursor: 'pointer',
-            transition: 'all 0.2s', transform: isListening ? 'scale(1.1)' : 'scale(1)'
-          }}>
-          {isListening ? <Icons.Mic /> : <Icons.Plus />}
-        </button>
+        <div style={{position: 'relative', width: 72, height: 72, marginTop: -40, display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+            {longPressProgress > 0 && (
+                <svg width="72" height="72" style={{position: 'absolute', transform: 'rotate(-90deg)', pointerEvents: 'none'}}>
+                    <circle cx="36" cy="36" r="34" stroke="#0f172a" strokeWidth="4" fill="transparent" />
+                    <circle cx="36" cy="36" r="34" stroke="#FF5252" strokeWidth="4" fill="transparent" 
+                        strokeDasharray={213} 
+                        strokeDashoffset={213 - (213 * longPressProgress) / 100}
+                        strokeLinecap="round"
+                    />
+                </svg>
+            )}
+            
+            <button 
+                onMouseDown={handleButtonDown}
+                onMouseUp={handleButtonUp}
+                onMouseLeave={handleButtonUp}
+                onTouchStart={(e) => { e.preventDefault(); handleButtonDown(); }}
+                onTouchEnd={(e) => { e.preventDefault(); handleButtonUp(); }}
+                style={{
+                    width: 64, height: 64, borderRadius: '50%', background: isListening ? '#FF5252' : '#2979FF',
+                    border: '6px solid #0f172a', 
+                    color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    boxShadow: '0 8px 24px rgba(41, 121, 255, 0.5)', 
+                    cursor: 'pointer', outline: 'none',
+                    transition: 'transform 0.1s', transform: longPressProgress > 0 ? 'scale(0.95)' : 'scale(1)'
+                }}>
+                {isListening ? <Icons.Mic /> : <Icons.Plus />}
+            </button>
+        </div>
 
         <button onClick={() => setActiveTab('CARDS')} style={{ background: 'none', border: 'none', color: activeTab === 'CARDS' ? '#2979FF' : '#64748b', padding: 8, cursor: 'pointer' }}><Icons.Card /></button>
         <button onClick={() => setActiveTab('BANKS')} style={{ background: 'none', border: 'none', color: activeTab === 'BANKS' ? '#2979FF' : '#64748b', padding: 8, cursor: 'pointer' }}><Icons.Bank /></button>
@@ -2102,5 +2180,8 @@ const App = () => {
   );
 };
 
-const root = createRoot(document.getElementById('root')!);
-root.render(<App />);
+const rootElement = document.getElementById('root');
+if (rootElement) {
+  const root = createRoot(rootElement);
+  root.render(<App />);
+}
